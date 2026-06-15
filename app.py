@@ -13,6 +13,15 @@ from src.config import (
 )
 from src.ev import build_bet_result
 from src.models import manual_probability_model
+from src.odds_api import (
+    HARD_ROCK_GENERIC_BOOKMAKER,
+    MissingApiKeyError,
+    OddsApiError,
+    get_bookmaker_diagnostics,
+    get_sports,
+    read_api_key,
+    select_hardrock_bookmaker,
+)
 from src.parlay import calculate_parlay, decimal_to_american
 from src.ui_components import (
     bets_to_dataframe,
@@ -38,22 +47,84 @@ def initialize_session_state() -> None:
         st.session_state.default_stake = DEFAULT_STAKE
     if "kelly_multiplier" not in st.session_state:
         st.session_state.kelly_multiplier = DEFAULT_KELLY_MULTIPLIER
+    if "hardrock_feed_mode" not in st.session_state:
+        st.session_state.hardrock_feed_mode = "Florida only"
+    if "navigation_page" not in st.session_state:
+        st.session_state.navigation_page = "Home"
+    if "odds_board_data" not in st.session_state:
+        st.session_state.odds_board_data = None
+    manual_defaults = {
+        "manual_sport": SUPPORTED_STAGE_1_SPORTS[0],
+        "manual_event": "",
+        "manual_market": SUPPORTED_STAGE_1_MARKETS[0],
+        "manual_selection": "",
+        "manual_american_odds": -110,
+    }
+    for key, value in manual_defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
 
 
 def reset_bets() -> None:
     st.session_state.bets = []
 
 
+def prefill_manual_bet(
+    *,
+    sport: str,
+    event: str,
+    market: str,
+    selection: str,
+    american_odds: int | float,
+) -> None:
+    st.session_state.manual_sport = (
+        sport if sport in SUPPORTED_STAGE_1_SPORTS else "Other"
+    )
+    st.session_state.manual_event = event
+    st.session_state.manual_market = (
+        market if market in SUPPORTED_STAGE_1_MARKETS else "Other"
+    )
+    st.session_state.manual_selection = selection
+    st.session_state.manual_american_odds = int(american_odds)
+    st.session_state.navigation_page = "Manual Entry"
+
+
+def get_configured_api_key() -> str:
+    try:
+        return read_api_key(st.secrets)
+    except FileNotFoundError as exc:
+        raise MissingApiKeyError(
+            "The Odds API key is missing. Add THE_ODDS_API_KEY to "
+            ".streamlit/secrets.toml and restart Streamlit."
+        ) from exc
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_sports(api_key: str) -> list[dict]:
+    return get_sports(api_key)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_bookmaker_diagnostics(
+    api_key: str,
+    sport_key: str,
+    market: str,
+) -> dict:
+    return get_bookmaker_diagnostics(api_key, sport_key, market=market)
+
+
 def render_home_page() -> None:
     st.title(APP_NAME)
-    st.caption("Stage 1: Manual odds entry + EV + Kelly + bet cards + simple parlay builder")
+    st.caption("Stage 2: Live Hard Rock Bet Florida odds plus all Stage 1 research tools")
     render_warning_box()
 
     st.markdown(
         """
-        ### What this Stage 1 app does
+        ### What this app does
 
-        This first version does **not** use APIs yet. You manually enter a line from Hard Rock FL or any book, add your estimated probability, and the app calculates:
+        Stage 2 can load current Hard Rock Bet Florida odds from The Odds API. You can
+        also manually enter a line from any book, add your estimated probability, and
+        use the original Stage 1 calculations:
 
         - American odds to implied probability
         - Decimal odds
@@ -76,6 +147,264 @@ def render_home_page() -> None:
         All results are research labels for **potential value bets** only.
         """
     )
+
+
+def render_live_odds_page() -> None:
+    st.title("Stage 2 Odds Diagnostics")
+    render_warning_box()
+    st.caption(
+        "Diagnostic mode requests all bookmakers in The Odds API us and us2 regions. "
+        "No Hard Rock bookmaker filter is sent."
+    )
+
+    try:
+        api_key = get_configured_api_key()
+    except MissingApiKeyError as exc:
+        st.error(str(exc))
+        st.info("Stage 1 pages remain available from the sidebar.")
+        return
+
+    try:
+        with st.spinner("Loading in-season sports..."):
+            sports = load_sports(api_key)
+    except OddsApiError as exc:
+        st.error(str(exc))
+        return
+
+    if not sports:
+        st.info("The Odds API returned no in-season sports.")
+        return
+
+    sport_by_label = {
+        f"{sport.get('group', 'Other')} | {sport['title']}": sport["key"]
+        for sport in sports
+    }
+    selected_label = st.selectbox("Sport", options=list(sport_by_label))
+    market_label = st.selectbox(
+        "Market",
+        options=["Moneyline", "Spread", "Total"],
+        help="Loading one market at a time conserves API credits.",
+    )
+    market_keys = {
+        "Moneyline": "h2h",
+        "Spread": "spreads",
+        "Total": "totals",
+    }
+    st.success(f"Sports list loaded: {len(sports)} available.")
+
+    if st.button("Run bookmaker diagnostic", type="primary"):
+        try:
+            with st.spinner("Loading unfiltered bookmaker diagnostics..."):
+                diagnostic = load_bookmaker_diagnostics(
+                    api_key,
+                    sport_by_label[selected_label],
+                    market_keys[market_label],
+                )
+        except (OddsApiError, ValueError) as exc:
+            st.error(str(exc))
+            return
+
+        diagnostic["sport_title"] = next(
+            sport["title"]
+            for sport in sports
+            if sport["key"] == sport_by_label[selected_label]
+        )
+        diagnostic["market_label"] = market_label
+        st.session_state.odds_board_data = diagnostic
+
+    diagnostic = st.session_state.odds_board_data
+    if diagnostic:
+        allow_generic = st.session_state.hardrock_feed_mode == "Allow generic Hard Rock"
+        matched_key = select_hardrock_bookmaker(
+            diagnostic["bookmaker_keys"],
+            allow_generic=allow_generic,
+        )
+
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Events returned", diagnostic["event_count"])
+        col2.metric("Unique bookmakers", diagnostic["bookmaker_count"])
+        col3.metric(
+            "hardrockbet_fl present",
+            "Yes" if diagnostic["hardrockbet_fl_present"] else "No",
+        )
+        col4.metric("Matched Hard Rock key", matched_key or "None")
+
+        st.subheader("Unique bookmaker keys")
+        if diagnostic["bookmaker_keys"]:
+            st.dataframe(
+                pd.DataFrame(
+                    {"bookmaker_key": diagnostic["bookmaker_keys"]}
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+        else:
+            st.info("The API returned no bookmaker keys for this sport and market.")
+
+        if matched_key == "hardrockbet_fl":
+            st.success(
+                "Matched Hard Rock key: hardrockbet_fl. Florida-specific feed selected."
+            )
+        elif matched_key == HARD_ROCK_GENERIC_BOOKMAKER:
+            st.warning(
+                "Using generic Hard Rock feed. This may differ from Florida-specific pricing."
+            )
+        elif diagnostic["hardrockbet_present"] and not allow_generic:
+            st.warning(
+                "hardrockbet is present, but Settings is configured for Florida only. "
+                "Enable Allow generic Hard Rock to use the fallback feed."
+            )
+        else:
+            st.warning(
+                "Neither hardrockbet_fl nor hardrockbet is present in the unfiltered "
+                "The Odds API response. This is upstream data availability, not a "
+                "Hard Rock filtering bug in this app."
+            )
+
+        st.divider()
+        st.subheader("Full Events Board")
+        if not diagnostic["events"]:
+            st.info("No events were returned for this sport and market.")
+            return
+
+        event_table = pd.DataFrame(
+            [
+                {
+                    "commence_time": event["commence_time"],
+                    "home_team": event["home_team"],
+                    "away_team": event["away_team"],
+                    "event": event["event"],
+                    "bookmaker_keys": ", ".join(event["bookmaker_keys"]),
+                    "hardrockbet_fl_present": event["hardrockbet_fl_present"],
+                    "hardrockbet_present": event["hardrockbet_present"],
+                }
+                for event in diagnostic["events"]
+            ]
+        )
+        st.dataframe(event_table, use_container_width=True, hide_index=True)
+
+        st.subheader("Selected Event Odds")
+        event_by_label = {
+            f"{event['commence_time']} | {event['event']}": event
+            for event in diagnostic["events"]
+        }
+        selected_event_label = st.selectbox(
+            "Game",
+            options=list(event_by_label),
+        )
+        selected_event = event_by_label[selected_event_label]
+
+        st.markdown(f"**Event:** {selected_event['event']}")
+        st.markdown(
+            f"**Date/time:** {selected_event['commence_time'] or 'Not provided'}"
+        )
+        st.markdown(f"**Event ID:** `{selected_event['id']}`")
+
+        show_only_hardrock = st.checkbox(
+            "Show only Hard Rock odds",
+            value=False,
+            help="Uncheck to show all bookmaker odds.",
+        )
+
+        eligible_hardrock_keys = {"hardrockbet_fl"}
+        if allow_generic:
+            eligible_hardrock_keys.add(HARD_ROCK_GENERIC_BOOKMAKER)
+
+        outcomes = list(selected_event["outcomes"])
+        if show_only_hardrock:
+            outcomes = [
+                row
+                for row in outcomes
+                if row["bookmaker_key"] in eligible_hardrock_keys
+            ]
+
+        outcomes.sort(
+            key=lambda row: (
+                0
+                if row["bookmaker_key"] == "hardrockbet_fl"
+                else 1
+                if (
+                    allow_generic
+                    and row["bookmaker_key"] == HARD_ROCK_GENERIC_BOOKMAKER
+                )
+                else 2,
+                row["bookmaker_key"],
+                row["selection"],
+            )
+        )
+
+        hardrock_outcomes = [
+            row
+            for row in selected_event["outcomes"]
+            if row["bookmaker_key"] in eligible_hardrock_keys
+        ]
+        if (
+            allow_generic
+            and any(
+                row["bookmaker_key"] == HARD_ROCK_GENERIC_BOOKMAKER
+                for row in hardrock_outcomes
+            )
+            and not selected_event["hardrockbet_fl_present"]
+        ):
+            st.warning(
+                "Using generic Hard Rock feed. Confirm manually in the Hard Rock Florida app."
+            )
+        if not hardrock_outcomes:
+            st.warning(
+                "No Hard Rock odds available from the API for this event. "
+                "Use this only as market reference."
+            )
+
+        if not outcomes:
+            st.info("No odds match the current filter.")
+            return
+
+        st.dataframe(
+            pd.DataFrame(outcomes)[
+                [
+                    "bookmaker",
+                    "bookmaker_key",
+                    "market_key",
+                    "selection",
+                    "price",
+                    "point",
+                ]
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        st.markdown("**Create a Stage 1 manual bet card:**")
+        for index, row in enumerate(outcomes):
+            with st.container(border=True):
+                details_col, action_col = st.columns([4, 1])
+                with details_col:
+                    point_text = (
+                        f" | Line: {row['point']}"
+                        if row["point"] is not None
+                        else ""
+                    )
+                    st.write(
+                        f"**{row['bookmaker']}** (`{row['bookmaker_key']}`) | "
+                        f"{row['market_key']} | {row['selection']} | "
+                        f"{row['price']:+g}{point_text}"
+                    )
+                with action_col:
+                    st.button(
+                        "Create manual bet card from this line",
+                        key=(
+                            f"prefill-{selected_event['id']}-"
+                            f"{row['bookmaker_key']}-{row['market_key']}-{index}"
+                        ),
+                        on_click=prefill_manual_bet,
+                        kwargs={
+                            "sport": diagnostic["sport_title"],
+                            "event": selected_event["event"],
+                            "market": diagnostic["market_label"],
+                            "selection": row["selection"],
+                            "american_odds": row["price"],
+                        },
+                    )
 
 
 def render_settings_page() -> None:
@@ -110,6 +439,21 @@ def render_settings_page() -> None:
         "You can keep using flat $1 stakes instead."
     )
 
+    st.subheader("Hard Rock feed preference")
+    st.session_state.hardrock_feed_mode = st.radio(
+        "Hard Rock bookmaker matching",
+        options=["Florida only", "Allow generic Hard Rock"],
+        index=(
+            1
+            if st.session_state.hardrock_feed_mode == "Allow generic Hard Rock"
+            else 0
+        ),
+        help=(
+            "Florida only accepts hardrockbet_fl. Allow generic Hard Rock falls back "
+            "to hardrockbet only when the Florida-specific key is unavailable."
+        ),
+    )
+
 
 def render_manual_entry_page() -> None:
     st.title("Manual Entry + EV Calculator")
@@ -119,16 +463,32 @@ def render_manual_entry_page() -> None:
         col1, col2 = st.columns(2)
 
         with col1:
-            sport = st.selectbox("Sport", SUPPORTED_STAGE_1_SPORTS)
-            event = st.text_input("Game / Event", placeholder="Example: Celtics vs Lakers")
-            market = st.selectbox("Market", SUPPORTED_STAGE_1_MARKETS)
-            selection = st.text_input("Selection", placeholder="Example: Celtics ML")
+            sport = st.selectbox(
+                "Sport",
+                SUPPORTED_STAGE_1_SPORTS,
+                key="manual_sport",
+            )
+            event = st.text_input(
+                "Game / Event",
+                placeholder="Example: Celtics vs Lakers",
+                key="manual_event",
+            )
+            market = st.selectbox(
+                "Market",
+                SUPPORTED_STAGE_1_MARKETS,
+                key="manual_market",
+            )
+            selection = st.text_input(
+                "Selection",
+                placeholder="Example: Celtics ML",
+                key="manual_selection",
+            )
 
         with col2:
             american_odds = st.number_input(
                 "Hard Rock FL American Odds",
-                value=-110,
                 step=5,
+                key="manual_american_odds",
                 help="Use American odds like -110, +125, +350.",
             )
             model_probability_percent = st.number_input(
@@ -309,7 +669,8 @@ def render_stage_status_page() -> None:
             {"Stage": "Stage 1", "Feature": "Kelly calculator", "Status": "Built now"},
             {"Stage": "Stage 1", "Feature": "Bet cards", "Status": "Built now"},
             {"Stage": "Stage 1", "Feature": "Simple parlay builder", "Status": "Built now"},
-            {"Stage": "Stage 2", "Feature": "The Odds API", "Status": "Not active yet"},
+            {"Stage": "Stage 2", "Feature": "The Odds API sports list", "Status": "Built now"},
+            {"Stage": "Stage 2", "Feature": "Hard Rock Bet Florida odds", "Status": "Built now"},
             {"Stage": "Stage 3", "Feature": "Market average + no-vig", "Status": "Not active yet"},
             {"Stage": "Stage 4", "Feature": "Basic models", "Status": "Not active yet"},
         ]
@@ -326,22 +687,26 @@ def main() -> None:
             "Go to",
             [
                 "Home",
+                "Live Odds",
                 "Manual Entry",
                 "Bet Cards",
                 "Parlay Builder",
                 "Settings",
                 "Stage Status",
             ],
+            key="navigation_page",
         )
 
         st.divider()
         st.metric("Current bet cards", len(st.session_state.bets))
         st.metric("Default stake", format_currency(st.session_state.default_stake))
         st.metric("Bankroll", format_currency(st.session_state.bankroll))
-        st.caption("No APIs connected in Stage 1.")
+        st.caption("Stage 2 uses The Odds API only on the Live Odds page.")
 
     if page == "Home":
         render_home_page()
+    elif page == "Live Odds":
+        render_live_odds_page()
     elif page == "Manual Entry":
         render_manual_entry_page()
     elif page == "Bet Cards":
