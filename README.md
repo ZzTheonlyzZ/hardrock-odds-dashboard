@@ -1,6 +1,6 @@
 # Hard Rock FL Odds Intelligence Dashboard
 
-Stage 1 personal sports betting research dashboard built with Python and Streamlit.
+Personal sports betting research dashboard built with Python and Streamlit.
 
 ## Important warnings
 
@@ -27,6 +27,32 @@ Betting is high variance. Only risk money you can afford to lose.
 - Simple parlay builder
 - Correlation and high-variance warnings
 
+## Stage 2 features
+
+- In-season sports from The Odds API
+- Current `hardrockbet_fl` moneyline, spread, and total odds
+- One market per refresh to conserve free-plan API credits
+- Diagnostic mode showing all unique `us`/`us2` bookmaker keys and event count
+- Explicit upstream warning when `hardrockbet_fl` is absent before filtering
+- Support for `hardrockbet_fl` and optional `hardrockbet` fallback
+- Florida-specific feed priority when both keys are available
+- Event Explorer with matchup, start time, and event-level bookmaker availability
+- Full events table and event-level market outcome board
+- One-click prefill from an API line into the Stage 1 manual bet form
+- American odds format
+- Cached sports and odds requests
+- Safe missing-key, invalid-key, network, and rate-limit messages
+
+## The Odds API setup
+
+Create `.streamlit/secrets.toml`:
+
+```toml
+THE_ODDS_API_KEY = "your-api-key"
+```
+
+The secrets file is ignored by Git and must never be committed.
+
 ## Install locally
 
 ```bash
@@ -40,6 +66,21 @@ source .venv/bin/activate
 
 pip install -r requirements.txt
 streamlit run app.py
+```
+
+In GitHub Codespaces, run:
+
+```bash
+python -m streamlit run app.py --server.address 0.0.0.0 --server.port 8501
+```
+
+Keep the forwarded port private.
+
+## Test
+
+```bash
+python -m unittest discover -s tests -v
+python -m compileall -q app.py src tests
 ```
 
 ## Project structure
@@ -70,7 +111,6 @@ hardrock-odds-dashboard/
 
 ## Later stages
 
-- Stage 2: The Odds API integration
 - Stage 3: comparison books, market average, and no-vig fair probability
 - Stage 4: basic models
 - Stage 5: improved parlay builder
