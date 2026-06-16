@@ -18,7 +18,7 @@ from src.probabilities import (
 
 
 SOURCE_RULES = {
-    HARD_ROCK_FL_BOOKMAKER: ("Exact Hard Rock Florida API", "High confidence"),
+    HARD_ROCK_FL_BOOKMAKER: ("Exact Hard Rock FL API", "High confidence"),
     HARD_ROCK_GENERIC_BOOKMAKER: (
         "Generic Hard Rock API",
         "Medium confidence, may differ from Florida",
@@ -54,10 +54,13 @@ def classify_source(
     manual: bool = False,
 ) -> tuple[str, str]:
     if manual:
-        return ("Manual Hard Rock Florida Entry", "Highest confidence")
+        return (
+            "Manual Hard Rock FL Entry",
+            "User-confirmed, highest confidence if copied from app",
+        )
     if bookmaker_key in SOURCE_RULES:
         return SOURCE_RULES[bookmaker_key]
-    return ("Market Reference", "Comparison only")
+    return ("Market Consensus / Other Books", "Comparison only")
 
 
 def enrich_odds_rows(outcomes: list[dict[str, Any]]) -> list[dict[str, Any]]:

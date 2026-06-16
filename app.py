@@ -57,6 +57,24 @@ st.set_page_config(
     layout="wide",
 )
 
+DEBUG_MODE = False
+
+MAIN_NAVIGATION = [
+    "Home",
+    "Research Board",
+    "Manual Entry",
+    "Bet Cards",
+    "Parlay Builder",
+    "Settings",
+    "Stage Status",
+]
+
+DEBUG_NAVIGATION = [
+    "Live Odds",
+    "Market Comparison",
+    "Advanced Markets",
+]
+
 
 def initialize_session_state() -> None:
     if "bets" not in st.session_state:
@@ -70,6 +88,10 @@ def initialize_session_state() -> None:
     if "hardrock_feed_mode" not in st.session_state:
         st.session_state.hardrock_feed_mode = "Florida only"
     if "navigation_page" not in st.session_state:
+        st.session_state.navigation_page = "Research Board"
+    if st.session_state.navigation_page not in MAIN_NAVIGATION + DEBUG_NAVIGATION:
+        st.session_state.navigation_page = "Research Board"
+    if not DEBUG_MODE and st.session_state.navigation_page in DEBUG_NAVIGATION:
         st.session_state.navigation_page = "Research Board"
     if "odds_board_data" not in st.session_state:
         st.session_state.odds_board_data = None
@@ -151,16 +173,19 @@ def load_bookmaker_diagnostics(
 
 def render_home_page() -> None:
     st.title(APP_NAME)
-    st.caption("Stage 2: Live Hard Rock Bet Florida odds plus all Stage 1 research tools")
+    st.caption("Research Board first, with Stage 1 through Stage 3 calculations preserved")
     render_warning_box()
 
     st.markdown(
         """
         ### What this app does
 
-        Stage 2 can load current Hard Rock Bet Florida odds from The Odds API. You can
-        also manually enter a line from any book, add your estimated probability, and
-        use the original Stage 1 calculations:
+        Use the Research Board as the main workflow:
+        Sport → Game → Market Category → Specific Market → Source Summary → Lines →
+        Manual Entry → EV/Kelly → Bet Card.
+
+        It combines Hard Rock source availability, market consensus, manual line entry,
+        and the original Stage 1 calculations:
 
         - American odds to implied probability
         - Decimal odds
@@ -222,8 +247,9 @@ def render_research_board_page() -> None:
     st.title("Research Board")
     render_warning_box()
     st.info(
-        "Unified research workflow. This app does not auto-bet, scrape Hard Rock, "
-        "or log into any sportsbook."
+        "Sport -> Game -> Market Category -> Specific Market -> Source Summary -> "
+        "Lines -> Manual Entry -> EV/Kelly -> Bet Card. This app does not auto-bet, "
+        "scrape Hard Rock, or log into any sportsbook."
     )
 
     try:
@@ -335,13 +361,16 @@ def render_research_board_page() -> None:
 
     st.subheader("Source Summary")
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Hard Rock FL available", "Yes" if summary["hardrock_fl_available"] else "No")
+    col1.metric(
+        "Exact Hard Rock FL available",
+        "Yes" if summary["hardrock_fl_available"] else "No",
+    )
     col2.metric(
         "Generic Hard Rock available",
         "Yes" if summary["generic_hardrock_available"] else "No",
     )
     col3.metric(
-        "Other bookmakers available",
+        "Market consensus available",
         "Yes" if summary["other_books_available"] else "No",
     )
     col4.metric(
@@ -349,9 +378,20 @@ def render_research_board_page() -> None:
         "Yes" if summary["manual_entry_required"] else "No",
     )
 
+    st.markdown(
+        """
+        **Coverage badges**
+        - Exact Hard Rock FL API: High confidence
+        - Generic Hard Rock API: Medium confidence, may differ from Florida
+        - Market Consensus / Other Books: Comparison only
+        - Manual Hard Rock FL Entry: User-confirmed, highest confidence if copied from app
+        """
+    )
+
     if not summary["hardrock_fl_available"] and not summary["generic_hardrock_available"]:
         st.warning(
-            "No Hard Rock API line found. Use manual Hard Rock FL entry."
+            "No Hard Rock API line found for this market. Use Manual Hard Rock FL "
+            "Entry and compare against market consensus."
         )
 
     st.subheader("Market Availability")
@@ -376,10 +416,10 @@ def render_research_board_page() -> None:
 
     fl_tab, generic_tab, comparison_tab, manual_tab = st.tabs(
         [
-            "Hard Rock FL lines only",
-            "Generic Hard Rock lines only",
-            "Market comparison / all books",
-            "Manual Hard Rock FL entry",
+            "Exact Hard Rock FL",
+            "Generic Hard Rock",
+            "Market Consensus",
+            "Manual Hard Rock FL Entry",
         ]
     )
 
@@ -396,7 +436,7 @@ def render_research_board_page() -> None:
     ]
     with fl_tab:
         if hardrock_fl_rows:
-            st.success("Exact Hard Rock FL | High confidence")
+            st.success("Exact Hard Rock FL API | High confidence")
             st.dataframe(
                 pd.DataFrame(hardrock_fl_rows)[display_columns],
                 use_container_width=True,
@@ -408,7 +448,7 @@ def render_research_board_page() -> None:
     with generic_tab:
         if generic_rows:
             st.warning(
-                "Generic Hard Rock | Medium confidence, may differ from Florida"
+                "Generic Hard Rock API | Medium confidence, may differ from Florida"
             )
             st.dataframe(
                 pd.DataFrame(generic_rows)[display_columns],
@@ -420,7 +460,7 @@ def render_research_board_page() -> None:
 
     with comparison_tab:
         if rows:
-            st.caption("Market Reference | comparison only")
+            st.caption("Market Consensus / Other Books | Comparison only")
             st.dataframe(
                 pd.DataFrame(rows)[display_columns],
                 use_container_width=True,
@@ -437,7 +477,9 @@ def render_research_board_page() -> None:
             )
 
     with manual_tab:
-        st.success("Manual Hard Rock FL | Highest confidence")
+        st.success(
+            "Manual Hard Rock FL Entry | User-confirmed, highest confidence if copied from app"
+        )
         st.caption(
             "Manual entry is always available. Enter the exact line currently shown "
             "inside the Hard Rock Florida app."
@@ -1619,41 +1661,34 @@ def main() -> None:
     with st.sidebar:
         st.header("Navigation")
         st.caption("Primary workflow")
+        navigation_options = list(MAIN_NAVIGATION)
+        if DEBUG_MODE:
+            navigation_options.extend(DEBUG_NAVIGATION)
         page = st.radio(
             "Go to",
-            [
-                "Research Board",
-                "Home",
-                "Manual Entry",
-                "Bet Cards",
-                "Parlay Builder",
-                "Settings",
-                "Stage Status",
-                "Live Odds",
-                "Market Comparison",
-                "Advanced Markets",
-            ],
+            navigation_options,
             key="navigation_page",
         )
-        st.caption(
-            "Live Odds, Market Comparison, and Advanced Markets are secondary/debug pages."
-        )
+        if DEBUG_MODE:
+            st.caption(
+                "Debug pages are visible: Live Odds, Market Comparison, and Advanced Markets."
+            )
 
         st.divider()
         st.metric("Current bet cards", len(st.session_state.bets))
         st.metric("Default stake", format_currency(st.session_state.default_stake))
         st.metric("Bankroll", format_currency(st.session_state.bankroll))
-        st.caption("Stage 2 uses The Odds API only on the Live Odds page.")
+        st.caption("Use Research Board as the main odds and value workflow.")
 
     if page == "Research Board":
         render_research_board_page()
     elif page == "Home":
         render_home_page()
-    elif page == "Live Odds":
+    elif DEBUG_MODE and page == "Live Odds":
         render_live_odds_page()
-    elif page == "Market Comparison":
+    elif DEBUG_MODE and page == "Market Comparison":
         render_market_comparison_page()
-    elif page == "Advanced Markets":
+    elif DEBUG_MODE and page == "Advanced Markets":
         render_advanced_markets_page()
     elif page == "Manual Entry":
         render_manual_entry_page()

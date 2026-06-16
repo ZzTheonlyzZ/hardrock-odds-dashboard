@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
+import app as dashboard_app
 from unittest.mock import patch
 
 import streamlit as st
@@ -121,22 +122,29 @@ class AppTests(unittest.TestCase):
         self.assertEqual(
             app.radio[0].options,
             [
-                "Research Board",
                 "Home",
+                "Research Board",
                 "Manual Entry",
                 "Bet Cards",
                 "Parlay Builder",
                 "Settings",
                 "Stage Status",
-                "Live Odds",
-                "Market Comparison",
-                "Advanced Markets",
             ],
         )
+        self.assertNotIn("Live Odds", app.radio[0].options)
+        self.assertNotIn("Market Comparison", app.radio[0].options)
+        self.assertNotIn("Advanced Markets", app.radio[0].options)
+        self.assertEqual(app.session_state["navigation_page"], "Research Board")
 
         app.radio[0].set_value("Manual Entry").run()
         self.assertFalse(app.exception)
         self.assertEqual(app.title[0].value, "Manual Entry + EV Calculator")
+
+    def test_legacy_pages_are_internal_debug_renderers(self):
+        self.assertFalse(dashboard_app.DEBUG_MODE)
+        self.assertTrue(callable(dashboard_app.render_live_odds_page))
+        self.assertTrue(callable(dashboard_app.render_market_comparison_page))
+        self.assertTrue(callable(dashboard_app.render_advanced_markets_page))
 
     @patch(
         "src.odds_api.read_api_key",
@@ -144,58 +152,46 @@ class AppTests(unittest.TestCase):
     )
     def test_missing_key_is_safe(self, _mock_read_api_key):
         app = AppTest.from_file("app.py", default_timeout=10).run()
-        navigation = next(radio for radio in app.radio if radio.label == "Go to")
-        navigation.set_value("Live Odds").run()
 
         self.assertFalse(app.exception)
         self.assertTrue(any("key is missing" in error.value for error in app.error))
-        self.assertTrue(any("Stage 1 pages remain available" in info.value for info in app.info))
+        self.assertEqual(app.title[0].value, "Research Board")
 
     @patch("src.odds_api.urlopen", side_effect=fake_api_response)
-    def test_diagnostic_page_shows_unfiltered_upstream_warning(self, _mock_urlopen):
+    def test_research_board_shows_missing_hardrock_api_warning(self, _mock_urlopen):
         app = AppTest.from_file("app.py", default_timeout=10).run()
-        app.radio[0].set_value("Live Odds").run()
 
         self.assertFalse(app.exception)
-        self.assertTrue(any("Sports list loaded" in item.value for item in app.success))
         self.assertEqual(app.selectbox[0].value, "Baseball | MLB")
 
         app.button[0].click().run()
+        load_market = next(
+            button
+            for button in app.button
+            if button.label == "Load odds / source availability"
+        )
+        load_market.click().run()
 
         self.assertFalse(app.exception)
-        self.assertTrue(
-            any("Florida only" in item.value for item in app.warning)
-        )
-        self.assertGreaterEqual(len(app.dataframe), 3)
-        self.assertEqual(app.selectbox[2].value, "2026-06-16T00:00:00Z | Atlanta Braves at Miami Marlins")
-        self.assertTrue(
-            any("Date/time:" in markdown.value for markdown in app.markdown)
-        )
         self.assertTrue(
             any(
                 warning.value
-                == "No Hard Rock odds available from the API for this event. Use this only as market reference."
+                == (
+                    "No Hard Rock API line found for this market. Use Manual Hard "
+                    "Rock FL Entry and compare against market consensus."
+                )
                 for warning in app.warning
             )
         )
-
-        prefill_button = next(
-            button
-            for button in app.button
-            if button.label == "Create manual bet card from this line"
+        self.assertTrue(
+            any(tab.label == "Market Consensus" for tab in app.tabs)
         )
-        prefill_button.click().run()
-
-        self.assertFalse(app.exception)
-        self.assertEqual(app.session_state["navigation_page"], "Manual Entry")
-        self.assertEqual(app.session_state["manual_sport"], "MLB")
-        self.assertEqual(
-            app.session_state["manual_event"],
-            "Atlanta Braves at Miami Marlins",
+        self.assertTrue(
+            any(
+                "Market Consensus / Other Books: Comparison only" in markdown.value
+                for markdown in app.markdown
+            )
         )
-        self.assertEqual(app.session_state["manual_market"], "Moneyline")
-        self.assertEqual(app.session_state["manual_selection"], "Atlanta Braves")
-        self.assertEqual(app.session_state["manual_american_odds"], -115)
 
     @patch("src.odds_api.urlopen", side_effect=fake_generic_hardrock_response)
     def test_generic_feed_setting_shows_required_warning(self, _mock_urlopen):
@@ -214,76 +210,63 @@ class AppTests(unittest.TestCase):
         )
 
         navigation = next(radio for radio in app.radio if radio.label == "Go to")
-        navigation.set_value("Live Odds").run()
+        navigation.set_value("Research Board").run()
         app.button[0].click().run()
+        load_market = next(
+            button
+            for button in app.button
+            if button.label == "Load odds / source availability"
+        )
+        load_market.click().run()
 
         self.assertFalse(app.exception)
         self.assertTrue(
             any(
                 warning.value
-                == "Using generic Hard Rock feed. This may differ from Florida-specific pricing."
+                == "Generic Hard Rock API | Medium confidence, may differ from Florida"
                 for warning in app.warning
             )
         )
         self.assertTrue(
             any(
-                warning.value
-                == "Using generic Hard Rock feed. Confirm manually in the Hard Rock Florida app."
-                for warning in app.warning
-            )
-        )
-        self.assertTrue(
-            any(
-                checkbox.label == "Show only Hard Rock odds"
-                for checkbox in app.checkbox
+                tab.label == "Generic Hard Rock"
+                for tab in app.tabs
             )
         )
 
     @patch("src.odds_api.urlopen", side_effect=fake_api_response)
-    def test_stage3_market_comparison_creates_card(self, _mock_urlopen):
+    def test_research_board_preserves_stage3_market_consensus(self, _mock_urlopen):
         app = AppTest.from_file("app.py", default_timeout=10).run()
-        navigation = next(radio for radio in app.radio if radio.label == "Go to")
-        navigation.set_value("Market Comparison").run()
 
         load_button = next(
             button
             for button in app.button
-            if button.label == "Load market comparison"
+            if button.label == "Load games"
         )
         load_button.click().run()
-
-        self.assertFalse(app.exception)
-        self.assertTrue(
-            any(subheader.value == "All Bookmaker Odds" for subheader in app.subheader)
-        )
-        self.assertTrue(
-            any(subheader.value == "Market Consensus" for subheader in app.subheader)
-        )
-
-        generate_button = next(
+        load_market = next(
             button
             for button in app.button
-            if button.label == "Generate Stage 3 bet card"
+            if button.label == "Load odds / source availability"
         )
-        generate_button.click().run()
+        load_market.click().run()
 
         self.assertFalse(app.exception)
-        self.assertEqual(len(app.session_state["stage3_cards"]), 1)
-        self.assertEqual(len(app.session_state["bets"]), 0)
         self.assertTrue(
-            any("Stage 3 bet card created" in success.value for success in app.success)
+            any(tab.label == "Market Consensus" for tab in app.tabs)
+        )
+        self.assertTrue(
+            any("Market average and no-vig consensus" in markdown.value for markdown in app.markdown)
         )
 
     @patch("src.odds_api.urlopen", side_effect=fake_api_response)
-    def test_advanced_markets_manual_only_card(self, _mock_urlopen):
+    def test_research_board_preserves_advanced_manual_market_card(self, _mock_urlopen):
         app = AppTest.from_file("app.py", default_timeout=10).run()
-        navigation = next(radio for radio in app.radio if radio.label == "Go to")
-        navigation.set_value("Advanced Markets").run()
 
         load_button = next(
             button
             for button in app.button
-            if button.label == "Load advanced market events"
+            if button.label == "Load games"
         )
         load_button.click().run()
 
@@ -292,37 +275,37 @@ class AppTests(unittest.TestCase):
             for selectbox in app.selectbox
             if selectbox.label == "Market category"
         )
-        category.set_value("Other Manual Market").run()
+        category.set_value("Other").run()
 
-        check_button = next(
+        load_market = next(
             button
             for button in app.button
-            if button.label == "Check API availability"
+            if button.label == "Load odds / source availability"
         )
-        check_button.click().run()
+        load_market.click().run()
 
         selection = next(
             text_input
             for text_input in app.text_input
-            if text_input.label == "Advanced selection"
+            if text_input.label == "Research selection"
         )
         selection.set_value("First half draw")
         create_button = next(
             button
             for button in app.button
-            if button.label == "Create advanced market bet card"
+            if button.label == "Create Research Board bet card"
         )
         create_button.click().run()
 
         self.assertFalse(app.exception)
-        self.assertEqual(len(app.session_state["advanced_cards"]), 1)
+        self.assertEqual(len(app.session_state["research_cards"]), 1)
         self.assertEqual(
-            app.session_state["advanced_cards"][0]["source_label"],
-            "Manual-only",
+            app.session_state["research_cards"][0]["source_type"],
+            "Manual Hard Rock FL Entry",
         )
         self.assertTrue(
             any(
-                "Advanced market bet card created" in success.value
+                "Research Board bet card created" in success.value
                 for success in app.success
             )
         )
@@ -351,12 +334,15 @@ class AppTests(unittest.TestCase):
         self.assertTrue(
             any(
                 warning.value
-                == "No Hard Rock API line found. Use manual Hard Rock FL entry."
+                == (
+                    "No Hard Rock API line found for this market. Use Manual Hard "
+                    "Rock FL Entry and compare against market consensus."
+                )
                 for warning in app.warning
             )
         )
         self.assertTrue(
-            any(tab.label == "Manual Hard Rock FL entry" for tab in app.tabs)
+            any(tab.label == "Manual Hard Rock FL Entry" for tab in app.tabs)
         )
 
         selection = next(
@@ -375,8 +361,11 @@ class AppTests(unittest.TestCase):
         self.assertFalse(app.exception)
         self.assertEqual(len(app.session_state["research_cards"]), 1)
         card = app.session_state["research_cards"][0]
-        self.assertEqual(card["source_type"], "Manual Hard Rock Florida Entry")
-        self.assertEqual(card["confidence"], "Highest confidence")
+        self.assertEqual(card["source_type"], "Manual Hard Rock FL Entry")
+        self.assertEqual(
+            card["confidence"],
+            "User-confirmed, highest confidence if copied from app",
+        )
 
 
 if __name__ == "__main__":

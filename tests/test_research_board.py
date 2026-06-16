@@ -15,7 +15,7 @@ class ResearchBoardTests(unittest.TestCase):
     def test_source_classification(self):
         self.assertEqual(
             classify_source("hardrockbet_fl"),
-            ("Exact Hard Rock Florida API", "High confidence"),
+            ("Exact Hard Rock FL API", "High confidence"),
         )
         self.assertEqual(
             classify_source("hardrockbet"),
@@ -23,7 +23,10 @@ class ResearchBoardTests(unittest.TestCase):
         )
         self.assertEqual(
             classify_source(None, manual=True),
-            ("Manual Hard Rock Florida Entry", "Highest confidence"),
+            (
+                "Manual Hard Rock FL Entry",
+                "User-confirmed, highest confidence if copied from app",
+            ),
         )
 
     def test_source_summary_and_availability(self):
@@ -72,10 +75,14 @@ class ResearchBoardTests(unittest.TestCase):
             kelly_multiplier=0.25,
             manual=True,
         )
-        self.assertEqual(card.source_type, "Manual Hard Rock Florida Entry")
-        self.assertEqual(card.confidence, "Highest confidence")
+        self.assertEqual(card.source_type, "Manual Hard Rock FL Entry")
+        self.assertEqual(
+            card.confidence,
+            "User-confirmed, highest confidence if copied from app",
+        )
         self.assertAlmostEqual(card.edge, 0.55 - 100 / 220)
 
 
 if __name__ == "__main__":
     unittest.main()
+
