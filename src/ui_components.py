@@ -16,9 +16,10 @@ def format_percent(value: float) -> str:
 
 def render_warning_box() -> None:
     st.warning(
-        "Manual confirmation required in the Hard Rock app before betting. "
-        "These are potential value bet research cards, not guaranteed winners. "
-        "Betting is high variance. Only risk money you can afford to lose."
+        "Potential value bets only. Manual confirmation required in the Hard Rock "
+        "Florida app. Sports betting is high variance and results are not guaranteed. "
+        "Past performance does not predict future results. Only risk money you can "
+        "afford to lose."
     )
 
 
