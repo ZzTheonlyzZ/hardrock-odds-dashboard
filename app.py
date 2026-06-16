@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
+
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 from src.advanced_markets import (
     SOCCER_MARKET_TEMPLATES,
@@ -36,11 +39,19 @@ from src.odds_api import (
 from src.parlay import calculate_parlay, decimal_to_american
 from src.probabilities import american_to_implied_probability
 from src.research_board import (
+    ai_package_to_csv,
+    ai_package_to_json,
+    ai_package_to_markdown,
+    ai_package_to_txt,
+    build_ai_research_package,
     build_research_card,
+    chatgpt_analysis_package_to_markdown,
+    build_hardrock_coverage_scan,
     enrich_odds_rows,
     find_no_vig_probability,
     market_availability_row,
     market_consensus,
+    markets_missing_from_hardrock_fl,
     source_summary,
 )
 from src.ui_components import (
@@ -109,6 +120,12 @@ def initialize_session_state() -> None:
         st.session_state.research_events_data = None
     if "research_market_data" not in st.session_state:
         st.session_state.research_market_data = None
+    if "research_scanner_data" not in st.session_state:
+        st.session_state.research_scanner_data = None
+    if "ai_package_markdown" not in st.session_state:
+        st.session_state.ai_package_markdown = ""
+    if "ai_package" not in st.session_state:
+        st.session_state.ai_package = None
     if "research_cards" not in st.session_state:
         st.session_state.research_cards = []
     manual_defaults = {
@@ -283,6 +300,9 @@ def render_research_board_page() -> None:
         data["sport_key"] = selected_sport["key"]
         st.session_state.research_events_data = data
         st.session_state.research_market_data = None
+        st.session_state.research_scanner_data = None
+        st.session_state.ai_package = None
+        st.session_state.ai_package_markdown = ""
 
     events_data = st.session_state.research_events_data
     if not events_data:
@@ -298,6 +318,313 @@ def render_research_board_page() -> None:
     }
     event_label = st.selectbox("Research event / game", options=list(event_by_label))
     selected_event = event_by_label[event_label]
+
+    all_templates = list(SOCCER_MARKET_TEMPLATES)
+    if st.button("Scan Hard Rock Markets"):
+        st.session_state.ai_package = None
+        st.session_state.ai_package_markdown = ""
+        outcomes_by_market = {}
+        errors = []
+        unique_api_market_keys = sorted(
+            {
+                api_market_key
+                for template in all_templates
+                for api_market_key in template.api_market_keys
+            }
+        )
+        for api_market_key in unique_api_market_keys:
+            try:
+                market_data = load_bookmaker_diagnostics(
+                    api_key,
+                    events_data["sport_key"],
+                    api_market_key,
+                )
+            except OddsApiError as exc:
+                errors.append(f"{api_market_key}: {exc}")
+                continue
+            matching_event = next(
+                (
+                    event
+                    for event in market_data["events"]
+                    if event["id"] == selected_event["id"]
+                ),
+                None,
+            )
+            outcomes_by_market[api_market_key] = (
+                matching_event["outcomes"] if matching_event else []
+            )
+
+        found_lines, missing_markets = build_hardrock_coverage_scan(
+            all_templates,
+            outcomes_by_market,
+        )
+        st.session_state.research_scanner_data = {
+            "event_id": selected_event["id"],
+            "event": selected_event["event"],
+            "sport": events_data["sport_title"],
+            "sport_key": events_data["sport_key"],
+            "commence_time": selected_event.get("commence_time", ""),
+            "home_team": selected_event.get("home_team", ""),
+            "away_team": selected_event.get("away_team", ""),
+            "found_lines": found_lines,
+            "missing_markets": missing_markets,
+            "errors": errors,
+        }
+
+    scanner_data = st.session_state.research_scanner_data
+    if scanner_data and scanner_data["event_id"] == selected_event["id"]:
+        st.subheader("Hard Rock Market Coverage")
+        if scanner_data["errors"]:
+            st.warning(
+                "Some API market checks failed. Available results are still shown."
+            )
+            with st.expander("Scanner API errors"):
+                for error in scanner_data["errors"]:
+                    st.write(error)
+
+        found_lines = list(scanner_data["found_lines"])
+        scanner_filter = st.radio(
+            "Hard Rock coverage filter",
+            [
+                "Show all Hard Rock lines",
+                "Exact FL only",
+                "Generic Hard Rock only",
+                "Markets missing FL but found generic",
+            ],
+            horizontal=True,
+        )
+        category_options = ["All categories"] + sorted(
+            {row["Market Category"] for row in found_lines}
+        )
+        scanner_category = st.selectbox(
+            "Scanner market category filter",
+            options=category_options,
+        )
+
+        filtered_lines = found_lines
+        if scanner_filter == "Exact FL only":
+            filtered_lines = [
+                row
+                for row in filtered_lines
+                if row["Hard Rock FL Available"] == "Yes"
+            ]
+        elif scanner_filter == "Generic Hard Rock only":
+            filtered_lines = [
+                row
+                for row in filtered_lines
+                if row["Generic Hard Rock Available"] == "Yes"
+            ]
+        elif scanner_filter == "Markets missing FL but found generic":
+            filtered_lines = [
+                row
+                for row in filtered_lines
+                if row["Hard Rock FL Available"] == "No"
+                and row["Generic Hard Rock Available"] == "Yes"
+            ]
+        if scanner_category != "All categories":
+            filtered_lines = [
+                row
+                for row in filtered_lines
+                if row["Market Category"] == scanner_category
+            ]
+
+        coverage_columns = [
+            "Market Category",
+            "Specific Market",
+            "Selection",
+            "Point / Line",
+            "Hard Rock FL Odds",
+            "Generic Hard Rock Odds",
+            "Consensus Odds",
+            "Hard Rock FL Available",
+            "Generic Hard Rock Available",
+            "Consensus Available",
+            "Confidence Label",
+            "Source Label",
+            "Difference",
+        ]
+        if filtered_lines:
+            st.dataframe(
+                pd.DataFrame(filtered_lines)[coverage_columns],
+                use_container_width=True,
+                hide_index=True,
+            )
+            for index, line in enumerate(filtered_lines):
+                point_text = (
+                    f" | {line['Point / Line']:+g}"
+                    if line["Point / Line"] is not None
+                    else ""
+                )
+                st.write(
+                    f"**{line['Specific Market']}** | {line['Selection']}"
+                    f"{point_text} | {line['Odds']:+d} | {line['Source used']}"
+                )
+                if st.button(
+                    "Create research card from this line",
+                    key=f"scanner-card-{selected_event['id']}-{index}",
+                ):
+                    card = build_research_card(
+                        sport=scanner_data["sport"],
+                        event=scanner_data["event"],
+                        market=line["Specific Market"],
+                        selection=line["Selection"],
+                        point=line["Point / Line"],
+                        american_odds=line["Odds"],
+                        estimated_probability=american_to_implied_probability(
+                            line["Odds"]
+                        ),
+                        no_vig_probability=None,
+                        stake=float(st.session_state.default_stake),
+                        bankroll=float(st.session_state.bankroll),
+                        kelly_multiplier=float(st.session_state.kelly_multiplier),
+                        bookmaker_key=line["bookmaker_key"],
+                    )
+                    st.session_state.research_cards.append(card.to_dict())
+                    st.success("Research card created from scanned Hard Rock line.")
+        else:
+            st.info(
+                "No Hard Rock API lines match the current scanner filters. If the "
+                "market is visible in the Hard Rock Florida app, use Manual Hard "
+                "Rock FL Entry and compare against market consensus."
+            )
+
+        st.subheader("Markets Missing From Hard Rock FL")
+        missing_fl = markets_missing_from_hardrock_fl(found_lines)
+        if missing_fl:
+            st.warning("Verify manually inside Hard Rock Florida before using this market.")
+            st.dataframe(
+                pd.DataFrame(missing_fl),
+                use_container_width=True,
+                hide_index=True,
+            )
+        else:
+            st.success("No scanned generic or consensus markets are missing Hard Rock FL.")
+
+        st.subheader("Hard Rock markets not found")
+        if scanner_data["missing_markets"]:
+            st.dataframe(
+                pd.DataFrame(scanner_data["missing_markets"]),
+                use_container_width=True,
+                hide_index=True,
+            )
+            st.info(
+                "These markets were not returned by The Odds API for hardrockbet_fl "
+                "or hardrockbet. If you see one in the real app, use Manual Hard "
+                "Rock FL Entry."
+            )
+        else:
+            st.success("Every mapped market returned at least one Hard Rock API line.")
+
+        if st.button("Generate AI Research Package"):
+            date_value = scanner_data["commence_time"]
+            date_part = date_value.split("T", 1)[0] if "T" in date_value else date_value
+            time_part = (
+                date_value.split("T", 1)[1].replace("Z", "")
+                if "T" in date_value
+                else "Unavailable"
+            )
+            manual_entries = [
+                {
+                    "Market": card["market"],
+                    "Selection": card["selection"],
+                    "Point": card.get("point"),
+                    "Odds": card["american_odds"],
+                    "User notes": "",
+                    "Confidence": "HIGHEST CONFIDENCE - USER VERIFIED",
+                }
+                for card in st.session_state.research_cards
+                if card.get("source_type") == "Manual Hard Rock FL Entry"
+            ]
+            package = build_ai_research_package(
+                game_info={
+                    "Sport": scanner_data["sport"],
+                    "League": scanner_data["sport"],
+                    "Competition stage": "Unavailable",
+                    "Event": scanner_data["event"],
+                    "Date": date_part,
+                    "Time": time_part,
+                    "Home team": scanner_data["home_team"],
+                    "Away team": scanner_data["away_team"],
+                    "Venue": "Unavailable",
+                    "Timezone": "UTC",
+                },
+                found_lines=found_lines,
+                missing_markets=scanner_data["missing_markets"],
+                manual_entries=manual_entries,
+                bankroll=float(st.session_state.bankroll),
+                kelly_multiplier=float(st.session_state.kelly_multiplier),
+            )
+            st.session_state.ai_package = package
+            st.session_state.ai_package_markdown = ai_package_to_markdown(package)
+
+        package = st.session_state.get("ai_package")
+        if package:
+            markdown_package = st.session_state.ai_package_markdown
+            chatgpt_package = chatgpt_analysis_package_to_markdown(package)
+            st.subheader("AI Research Package")
+            st.text_area(
+                "Copy AI Package",
+                value=markdown_package,
+                height=360,
+            )
+            components.html(
+                f"""
+                <button
+                    type="button"
+                    onclick='navigator.clipboard.writeText({json.dumps(markdown_package)})'
+                    style="
+                        border: 1px solid #d0d7de;
+                        border-radius: 6px;
+                        padding: 8px 12px;
+                        background: #f6f8fa;
+                        color: #24292f;
+                        cursor: pointer;
+                        font: 14px sans-serif;
+                    "
+                >
+                    Copy AI Package
+                </button>
+                """,
+                height=46,
+            )
+
+            st.download_button(
+                "Download TXT",
+                data=ai_package_to_txt(package),
+                file_name="ai_research_package.txt",
+                mime="text/plain",
+            )
+            st.download_button(
+                "Download Markdown",
+                data=markdown_package,
+                file_name="ai_research_package.md",
+                mime="text/markdown",
+            )
+            st.download_button(
+                "Download CSV",
+                data=ai_package_to_csv(package),
+                file_name="ai_research_package.csv",
+                mime="text/csv",
+            )
+            st.download_button(
+                "Download JSON",
+                data=ai_package_to_json(package),
+                file_name="ai_research_package.json",
+                mime="application/json",
+            )
+
+            st.subheader("ChatGPT Analysis Package")
+            st.text_area(
+                "ChatGPT Analysis Package",
+                value=chatgpt_package,
+                height=300,
+            )
+            st.download_button(
+                "Download ChatGPT Analysis Package",
+                data=chatgpt_package,
+                file_name="chatgpt_analysis_package.md",
+                mime="text/markdown",
+            )
 
     groups = list(dict.fromkeys(template.group for template in SOCCER_MARKET_TEMPLATES))
     market_group = st.selectbox("Market category", options=groups)

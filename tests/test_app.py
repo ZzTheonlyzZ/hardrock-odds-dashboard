@@ -4,6 +4,7 @@ import json
 import unittest
 import app as dashboard_app
 from unittest.mock import patch
+from urllib.parse import parse_qs, urlparse
 
 import streamlit as st
 from streamlit.testing.v1 import AppTest
@@ -106,6 +107,100 @@ def fake_generic_hardrock_response(url, timeout):
                         ],
                     }
                 ]
+            }
+        ]
+    )
+
+
+def fake_scanner_response(url, timeout):
+    if "/sports/?" in url:
+        return FakeResponse(
+            [
+                {
+                    "key": "baseball_mlb",
+                    "group": "Baseball",
+                    "title": "MLB",
+                    "active": True,
+                }
+            ]
+        )
+
+    market = parse_qs(urlparse(url).query).get("markets", [""])[0]
+    hardrock_markets = []
+    if market == "h2h":
+        hardrock_markets = [
+            {
+                "key": "h2h",
+                "outcomes": [
+                    {"name": "Atlanta Braves", "price": -115},
+                ],
+            }
+        ]
+        generic_markets = [
+            {
+                "key": "h2h",
+                "outcomes": [
+                    {"name": "Atlanta Braves", "price": -110},
+                ],
+            }
+        ]
+        consensus_markets = [
+            {
+                "key": "h2h",
+                "outcomes": [
+                    {"name": "Atlanta Braves", "price": -108},
+                    {"name": "Miami Marlins", "price": 102},
+                ],
+            }
+        ]
+    elif market == "spreads":
+        hardrock_markets = []
+        generic_markets = [
+            {
+                "key": "spreads",
+                "outcomes": [
+                    {"name": "Atlanta Braves", "price": -105, "point": -1.5},
+                ],
+            }
+        ]
+        consensus_markets = [
+            {
+                "key": "spreads",
+                "outcomes": [
+                    {"name": "Atlanta Braves", "price": -101, "point": -1.5},
+                    {"name": "Miami Marlins", "price": -109, "point": 1.5},
+                ],
+            }
+        ]
+    else:
+        generic_markets = []
+        consensus_markets = []
+
+    return FakeResponse(
+        [
+            {
+                "id": "mlb-1",
+                "sport_title": "MLB",
+                "commence_time": "2026-06-16T00:00:00Z",
+                "home_team": "Miami Marlins",
+                "away_team": "Atlanta Braves",
+                "bookmakers": [
+                    {
+                        "key": "hardrockbet_fl",
+                        "title": "Hard Rock Bet FL",
+                        "markets": hardrock_markets,
+                    },
+                    {
+                        "key": "hardrockbet",
+                        "title": "Hard Rock Bet",
+                        "markets": generic_markets,
+                    },
+                    {
+                        "key": "fanduel",
+                        "title": "FanDuel",
+                        "markets": consensus_markets,
+                    },
+                ],
             }
         ]
     )
@@ -365,6 +460,93 @@ class AppTests(unittest.TestCase):
         self.assertEqual(
             card["confidence"],
             "User-confirmed, highest confidence if copied from app",
+        )
+
+    @patch("src.odds_api.urlopen", side_effect=fake_scanner_response)
+    def test_research_board_scanner_creates_card_from_scanned_line(
+        self,
+        _mock_urlopen,
+    ):
+        app = AppTest.from_file("app.py", default_timeout=10).run()
+
+        load_games = next(
+            button for button in app.button if button.label == "Load games"
+        )
+        load_games.click().run()
+        scan = next(
+            button
+            for button in app.button
+            if button.label == "Scan Hard Rock Markets"
+        )
+        scan.click().run()
+
+        self.assertFalse(app.exception)
+        self.assertTrue(
+            any(
+                subheader.value == "Hard Rock Market Coverage"
+                for subheader in app.subheader
+            )
+        )
+        self.assertTrue(
+            any(
+                subheader.value == "Markets Missing From Hard Rock FL"
+                for subheader in app.subheader
+            )
+        )
+        self.assertTrue(
+            any(
+                "Exact Hard Rock FL API" in markdown.value
+                for markdown in app.markdown
+            )
+        )
+
+        create = next(
+            button
+            for button in app.button
+            if button.label == "Create research card from this line"
+        )
+        create.click().run()
+
+        self.assertFalse(app.exception)
+        self.assertEqual(len(app.session_state["research_cards"]), 1)
+        card = app.session_state["research_cards"][0]
+        self.assertEqual(card["source_type"], "Exact Hard Rock FL API")
+        self.assertEqual(card["confidence"], "High confidence")
+
+    @patch("src.odds_api.urlopen", side_effect=fake_scanner_response)
+    def test_research_board_ai_package_export_and_copy_box(
+        self,
+        _mock_urlopen,
+    ):
+        app = AppTest.from_file("app.py", default_timeout=10).run()
+
+        load_games = next(
+            button for button in app.button if button.label == "Load games"
+        )
+        load_games.click().run()
+        scan = next(
+            button
+            for button in app.button
+            if button.label == "Scan Hard Rock Markets"
+        )
+        scan.click().run()
+        generate = next(
+            button
+            for button in app.button
+            if button.label == "Generate AI Research Package"
+        )
+        generate.click().run()
+
+        self.assertFalse(app.exception)
+        self.assertTrue(app.session_state["ai_package"])
+        self.assertTrue(
+            any(text_area.label == "Copy AI Package" for text_area in app.text_area)
+        )
+        self.assertTrue(
+            any(
+                "These are potential value bets only." in text_area.value
+                for text_area in app.text_area
+            )
         )
 
 
