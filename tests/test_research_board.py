@@ -277,14 +277,38 @@ class ResearchBoardTests(unittest.TestCase):
             ],
             bankroll=100.0,
             kelly_multiplier=0.25,
+            api_usage=[{"API name": "API-Football", "Status": "Healthy"}],
+            team_research=[{"Team": "Braves", "Last 5": "W-W-L-W-D"}],
+            player_research=[{"Name": "Starter", "Position": "Forward"}],
+            contextual_factors=[{"Factor": "Weather", "Value": "Clear"}],
+            integration_diagnostics={
+                "Home team API-Football team ID": 123,
+                "Fixture history request attempted": "Yes",
+                "Weather coordinates available": "Yes",
+            },
+            team_mappings={"Braves": {"id": 123, "matched_name": "Braves"}},
+            missing_data=["No fixture history returned"],
         )
 
         parsed_json = json.loads(ai_package_to_json(package))
         self.assertEqual(parsed_json["source_summary"]["Number of Hard Rock FL lines"], 1)
+        self.assertEqual(parsed_json["team_research"][0]["Team"], "Braves")
+        self.assertEqual(parsed_json["player_research"][0]["Name"], "Starter")
+        self.assertEqual(parsed_json["contextual_factors"][0]["Factor"], "Weather")
+        self.assertEqual(
+            parsed_json["integration_diagnostics"]["Fixture history request attempted"],
+            "Yes",
+        )
+        self.assertEqual(parsed_json["team_mappings"]["Braves"]["id"], 123)
         markdown = ai_package_to_markdown(package)
         self.assertIn("## Section 8 - Bet Rankings", markdown)
         self.assertIn("TOP 5 POTENTIAL VALUE BETS", markdown)
         self.assertIn("## Section 10 - Data Gaps", markdown)
+        self.assertIn("## Team Research", markdown)
+        self.assertIn("## Player Research", markdown)
+        self.assertIn("## Contextual Factors", markdown)
+        self.assertIn("## Live Integration Diagnostics", markdown)
+        self.assertIn("API-Football Team ID Mappings", markdown)
         self.assertNotIn('{"Market Category"', markdown)
         chatgpt_markdown = chatgpt_analysis_package_to_markdown(package)
         self.assertIn("# ChatGPT Analysis Package", chatgpt_markdown)

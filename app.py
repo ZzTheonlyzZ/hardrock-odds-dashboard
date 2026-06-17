@@ -62,6 +62,7 @@ from src.research_lab import (
     request_budget_preview,
     unavailable_research_snapshot,
 )
+from src.research_integrations import build_live_soccer_research_snapshot
 from src.ui_components import (
     bets_to_dataframe,
     format_currency,
@@ -335,17 +336,6 @@ def render_research_board_page() -> None:
     }
     event_label = st.selectbox("Research event / game", options=list(event_by_label))
     selected_event = event_by_label[event_label]
-    current_scanner = st.session_state.research_scanner_data
-    current_lines = (
-        current_scanner["found_lines"]
-        if current_scanner and current_scanner["event_id"] == selected_event["id"]
-        else []
-    )
-    status_cards = source_status_summary(current_lines)
-    status_cols = st.columns(5)
-    for column, (label, value) in zip(status_cols, status_cards.items()):
-        column.metric(label, value)
-
     groups = list(dict.fromkeys(template.group for template in SOCCER_MARKET_TEMPLATES))
     market_group = st.selectbox("Market category", options=groups)
     templates = [
@@ -452,12 +442,26 @@ def render_research_board_page() -> None:
             "errors": errors,
         }
 
+    current_scanner = st.session_state.research_scanner_data
+    current_lines = (
+        current_scanner["found_lines"]
+        if current_scanner and current_scanner["event_id"] == selected_event["id"]
+        else []
+    )
+    status_cards = source_status_summary(
+        current_lines,
+        st.session_state.research_context_data,
+    )
+    status_cols = st.columns(5)
+    for column, (label, value) in zip(status_cols, status_cards.items()):
+        column.metric(label, value)
+
     scanner_data = st.session_state.research_scanner_data
     if scanner_data and scanner_data["event_id"] == selected_event["id"]:
         found_lines = list(scanner_data["found_lines"])
         missing_fl = markets_missing_from_hardrock_fl(found_lines)
-        api_usage_rows = default_api_usage_rows()
         context_data = st.session_state.research_context_data
+        api_usage_rows = context_data.get("api_usage") or default_api_usage_rows()
         compact_source_status = (
             "Source status: "
             f"Exact Hard Rock FL: {'Yes' if any(row['Hard Rock FL Available'] == 'Yes' for row in found_lines) else 'No'} | "
@@ -469,6 +473,7 @@ def render_research_board_page() -> None:
             found_lines,
             bankroll=float(st.session_state.bankroll),
             kelly_multiplier=float(st.session_state.kelly_multiplier),
+            context_data=context_data,
         )
         lab_tabs = st.tabs(
             [
@@ -645,30 +650,74 @@ def render_research_board_page() -> None:
                 else:
                     st.success("Every mapped market returned at least one API line.")
 
+            board = st.session_state.research_market_data
+            if (
+                board
+                and board["event_id"] == selected_event["id"]
+                and board["market"] == specific_market
+            ):
+                selected_rows = board["rows"]
+                selected_summary = source_summary(selected_rows)
+                st.subheader("Selected Market Source Details")
+                detail_cols = st.columns(4)
+                detail_cols[0].metric(
+                    "Exact Hard Rock FL available",
+                    "Yes" if selected_summary["hardrock_fl_available"] else "No",
+                )
+                detail_cols[1].metric(
+                    "Generic Hard Rock available",
+                    "Yes" if selected_summary["generic_hardrock_available"] else "No",
+                )
+                detail_cols[2].metric(
+                    "Market consensus available",
+                    "Yes" if selected_summary["other_books_available"] else "No",
+                )
+                detail_cols[3].metric(
+                    "Manual entry required",
+                    "Yes" if selected_summary["manual_entry_required"] else "No",
+                )
+                st.dataframe(
+                    pd.DataFrame([market_availability_row(specific_market, selected_rows)]),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
         with lab_tabs[1]:
             st.caption(compact_source_status)
-            st.info(
-                "Stage 4A: Research Lab scaffold active. Team/player/context "
-                "integrations are placeholders until live API clients are added."
-            )
-            st.warning(
-                "Live team/player/context integrations are not connected yet. "
-                "Placeholder fields are shown for manual review."
-            )
+            diagnostics = context_data.get("integration_diagnostics", {})
+            player_summary = context_data.get("player_summary", {})
+            squad_loaded = int(player_summary.get("Squad players loaded") or 0) > 0
+            if diagnostics.get("API-Football key found") == "No":
+                st.warning(
+                    "Live team/player/context integrations are not connected yet. API key missing."
+                )
+            elif context_data.get("data_quality") in {"Odds + team form", "Odds + team/player/context"} or squad_loaded:
+                st.success(
+                    "Live integrations partially connected: team/squad data loaded; "
+                    "some detailed stats may be unavailable."
+                )
+            else:
+                st.warning(
+                    "API key found, but no live research data returned for this event. "
+                    "Check diagnostics."
+                )
             research_subtabs = st.tabs(["Team Form", "Player Research", "Context"])
             with research_subtabs[0]:
                 st.subheader("Team Research Panel")
                 st.dataframe(pd.DataFrame(context_data["team_form"]), use_container_width=True, hide_index=True)
             with research_subtabs[1]:
                 st.subheader("Player Research Panel")
+                if player_summary:
+                    player_cols = st.columns(4)
+                    for column, (label, value) in zip(player_cols, player_summary.items()):
+                        column.metric(label, value)
                 st.dataframe(pd.DataFrame(context_data["players"]), use_container_width=True, hide_index=True)
             with research_subtabs[2]:
                 st.subheader("Contextual Factors Panel")
                 st.dataframe(pd.DataFrame(context_data["context"]), use_container_width=True, hide_index=True)
             st.info(
-                "Team/player/context data is not being used for final probability yet. "
-                "Current Betting Signal Panel is odds-only. Manual Hard Rock "
-                "confirmation is still required. Future Stage 4B will connect live team form."
+                "Team/player/context data is context only and is not a true prediction "
+                "model yet. Manual Hard Rock FL confirmation is still required."
             )
 
         with lab_tabs[2]:
@@ -679,7 +728,7 @@ def render_research_board_page() -> None:
                 "Small Edge Leans": sum(s["Classification"] == "Small Edge Lean" for s in betting_signals),
                 "Lottery Tickets": sum(s["Classification"] == "Lottery Ticket" for s in betting_signals),
                 "No Bets": sum(s["Classification"] == "No Bet" for s in betting_signals),
-                "Odds-only signals": sum(s["Data Status"] == "Odds only" for s in betting_signals),
+                "Odds-only signals": sum(s["Data Status"] == "Odds-only" for s in betting_signals),
                 "Signals requiring manual confirmation": sum(
                     "Manual confirmation required" in s["Contradiction flags"]
                     for s in betting_signals
@@ -799,7 +848,7 @@ def render_research_board_page() -> None:
                 "Odds data available": "Yes" if found_lines else "No",
                 "Exact Hard Rock FL available": "Yes" if any(row["Hard Rock FL Available"] == "Yes" for row in found_lines) else "No",
                 "Generic Hard Rock available": "Yes" if any(row["Generic Hard Rock Available"] == "Yes" for row in found_lines) else "No",
-                "Team/player/context data": "Placeholder",
+                "Team/player/context data": context_data.get("data_quality", "Odds-only"),
                 "Manual confirmation required": "Yes",
             }
             st.dataframe(pd.DataFrame([readiness]), use_container_width=True, hide_index=True)
@@ -857,6 +906,9 @@ def render_research_board_page() -> None:
                     player_research=context_data["players"],
                     contextual_factors=context_data["context"],
                     betting_signals=betting_signals,
+                    integration_diagnostics=context_data.get("integration_diagnostics", {}),
+                    team_mappings=context_data.get("team_mappings", {}),
+                    missing_data=context_data.get("missing_data", []),
                 )
                 st.session_state.ai_package = package
                 st.session_state.ai_package_markdown = ai_package_to_markdown(package)
@@ -896,6 +948,19 @@ def render_research_board_page() -> None:
             st.caption(compact_source_status)
             st.subheader("API Usage Monitor")
             st.dataframe(pd.DataFrame(api_usage_rows), use_container_width=True, hide_index=True)
+            quota_warnings = [
+                row
+                for row in api_usage_rows
+                if row.get("Status") in {"Watch", "Warning", "Critical", "Limit reached"}
+            ]
+            if quota_warnings:
+                st.warning(
+                    "API budget warning: "
+                    + "; ".join(
+                        f"{row.get('API name')}: {row.get('Status')}"
+                        for row in quota_warnings
+                    )
+                )
             st.subheader("Request Budget Preview")
             budget_mode = st.radio(
                 "Research load mode",
@@ -920,11 +985,60 @@ def render_research_board_page() -> None:
                 use_container_width=True,
                 hide_index=True,
             )
+            use_manual_coordinates = st.checkbox("Use manual venue coordinates for weather")
+            venue_latitude = None
+            venue_longitude = None
+            if use_manual_coordinates:
+                coord_col1, coord_col2 = st.columns(2)
+                with coord_col1:
+                    venue_latitude = st.number_input(
+                        "Venue latitude",
+                        min_value=-90.0,
+                        max_value=90.0,
+                        value=25.7617,
+                        step=0.0001,
+                        format="%.4f",
+                    )
+                with coord_col2:
+                    venue_longitude = st.number_input(
+                        "Venue longitude",
+                        min_value=-180.0,
+                        max_value=180.0,
+                        value=-80.1918,
+                        step=0.0001,
+                        format="%.4f",
+                    )
             if st.button(budget_mode):
-                st.session_state.research_context_data = unavailable_research_snapshot(
-                    "Unavailable - API key missing or research load not configured"
-                )
+                if budget_key == "package_only":
+                    st.session_state.research_context_data = unavailable_research_snapshot(
+                        "Unavailable - no extra API calls requested"
+                    )
+                else:
+                    st.session_state.research_context_data = build_live_soccer_research_snapshot(
+                        secrets=st.secrets,
+                        home_team=selected_event["home_team"],
+                        away_team=selected_event["away_team"],
+                        commence_time=selected_event["commence_time"],
+                        venue_latitude=venue_latitude,
+                        venue_longitude=venue_longitude,
+                    )
+                context_data = st.session_state.research_context_data
                 st.success("Research context prepared without unsafe sportsbook automation.")
+            with st.expander("Live integration diagnostics"):
+                diagnostics = context_data.get("integration_diagnostics", {})
+                if diagnostics:
+                    st.dataframe(
+                        pd.DataFrame(
+                            [
+                                {"Diagnostic": key, "Value": str(value)}
+                                for key, value in diagnostics.items()
+                            ]
+                        ),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+                else:
+                    st.info("No live integration diagnostics captured yet.")
             with st.expander("Scanner API errors / diagnostics"):
                 if scanner_data["errors"]:
                     st.warning(
@@ -936,10 +1050,20 @@ def render_research_board_page() -> None:
                     st.success("No scanner API errors captured.")
             with st.expander("Raw API headers if captured"):
                 st.info("No raw API headers captured in this Streamlit session.")
+            with st.expander("Raw API request log"):
+                raw_log = context_data.get("api_request_log", [])
+                if raw_log:
+                    st.dataframe(pd.DataFrame(raw_log), use_container_width=True, hide_index=True)
+                else:
+                    st.info("No raw API request rows captured yet.")
             with st.expander("Cache status"):
                 st.write(f"Last context update: {context_data.get('last_updated', 'Unknown')}")
             with st.expander("Missing API keys"):
-                st.write("API-Football, football-data.org, and weather integrations are scaffolded placeholders.")
+                missing_data = context_data.get("missing_data", [])
+                if missing_data:
+                    st.write(", ".join(str(item) for item in missing_data))
+                else:
+                    st.write("No missing live research keys or context fields captured.")
 
     board = st.session_state.research_market_data
     if (
@@ -948,6 +1072,8 @@ def render_research_board_page() -> None:
         or board["market"] != specific_market
     ):
         st.info("Select a game and market, then load odds/source availability.")
+        return
+    if scanner_data and scanner_data["event_id"] == selected_event["id"]:
         return
 
     rows = board["rows"]

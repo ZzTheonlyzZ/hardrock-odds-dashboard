@@ -144,6 +144,30 @@ def default_api_usage_rows() -> list[dict[str, Any]]:
     ]
 
 
+def aggregate_api_usage_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    providers: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        name = row.get("API name", "Unknown")
+        if name not in providers:
+            providers[name] = dict(row)
+            continue
+        current = providers[name]
+        for key in [
+            "Plan/configured limit",
+            "Requests used",
+            "Requests remaining",
+            "Last request cost",
+            "Minute remaining",
+            "Daily remaining",
+            "Reset time",
+            "Status",
+        ]:
+            value = row.get(key)
+            if value not in (None, ""):
+                current[key] = value
+    return list(providers.values())
+
+
 def request_budget_preview(mode: str) -> list[dict[str, Any]]:
     budgets = {
         "basic": (1, 0, 0, 0, 1),
@@ -168,9 +192,9 @@ def unavailable_research_snapshot(reason: str = "Unavailable - API key missing")
         "team_form": [
             {
                 "Team": "Home",
-                "Status": "Placeholder - API-Football not connected",
-                "Last 5": "",
-                "Last 10": "",
+                "Status": reason,
+                "Last 5": reason,
+                "Last 10": reason,
                 "Wins": "",
                 "Draws": "",
                 "Losses": "",
@@ -181,12 +205,13 @@ def unavailable_research_snapshot(reason: str = "Unavailable - API key missing")
                 "Over 2.5 rate": "",
                 "Clean sheets": "",
                 "Failed to score": "",
+                "Home/away split": "",
             },
             {
                 "Team": "Away",
-                "Status": "Placeholder - API-Football not connected",
-                "Last 5": "",
-                "Last 10": "",
+                "Status": reason,
+                "Last 5": reason,
+                "Last 10": reason,
                 "Wins": "",
                 "Draws": "",
                 "Losses": "",
@@ -197,6 +222,7 @@ def unavailable_research_snapshot(reason: str = "Unavailable - API key missing")
                 "Over 2.5 rate": "",
                 "Clean sheets": "",
                 "Failed to score": "",
+                "Home/away split": "",
             },
         ],
         "players": [
@@ -215,12 +241,42 @@ def unavailable_research_snapshot(reason: str = "Unavailable - API key missing")
             }
         ],
         "context": [
-            {"Factor": "Schedule/fatigue", "Value": "Placeholder", "Betting note": "Manual review required."},
+            {"Factor": "Schedule/fatigue", "Value": reason, "Betting note": "Manual review required."},
             {"Factor": "Travel", "Value": reason, "Betting note": "Label estimated if entered manually."},
-            {"Factor": "Weather", "Value": "Placeholder - venue weather not connected", "Betting note": "Weather is context only, not a standalone betting reason."},
+            {"Factor": "Weather", "Value": reason, "Betting note": "Weather is context only, not a standalone betting reason."},
             {"Factor": "Venue", "Value": "Manual estimate available", "Betting note": "Manual venue confirmation available."},
-            {"Factor": "Referee", "Value": "Placeholder - referee feed not connected", "Betting note": "Cards prop confidence reduced if missing."},
+            {"Factor": "Referee", "Value": reason, "Betting note": "Cards prop confidence reduced if missing."},
         ],
+        "api_usage": default_api_usage_rows(),
+        "api_request_log": default_api_usage_rows(),
+        "missing_data": [reason],
+        "data_quality": "Odds-only",
+        "integration_diagnostics": {
+            "API-Football key found": "No",
+            "API-Football team search status": "Not attempted",
+            "Home team API-Football team ID": "",
+            "Away team API-Football team ID": "",
+            "Home team matched name": "Home",
+            "Away team matched name": "Away",
+            "Fixture history request attempted": "No",
+            "Fixture history rows returned for home team": 0,
+            "Fixture history rows returned for away team": 0,
+            "Squad request attempted": "No",
+            "Squad rows returned for home team": 0,
+            "Squad rows returned for away team": 0,
+            "Player stats request attempted": "No",
+            "Player stats rows returned": 0,
+            "Weather request attempted": "No",
+            "Weather coordinates available": "No",
+            "Last safe API error message": reason,
+        },
+        "team_mappings": {},
+        "player_summary": {
+            "Squad players loaded": 0,
+            "Detailed player stats loaded": 0,
+            "Confirmed lineup loaded": "No",
+            "Player prop confidence": "Reduced until lineup confirmed",
+        },
         "last_updated": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -230,8 +286,10 @@ def build_betting_signals(
     *,
     bankroll: float,
     kelly_multiplier: float,
+    context_data: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     signals = []
+    data_status = research_data_status(context_data)
     for line in lines:
         odds = line["Odds"]
         implied = american_to_implied_probability(odds)
@@ -248,6 +306,10 @@ def build_betting_signals(
             confidence=confidence,
             odds=odds,
         )
+        if data_status != "Odds + team form" and classification == "Serious EV Bet":
+            classification = "Small Edge Lean"
+        if data_status == "Manual review required" and classification != "No Bet":
+            classification = "Small Edge Lean"
         signals.append(
             {
                 "Market Category": line.get("Market Category", ""),
@@ -268,12 +330,40 @@ def build_betting_signals(
                 "Confidence": confidence,
                 "Risk level": risk_level(odds, confidence),
                 "Classification": classification,
-                "Data Status": "Odds only",
-                "Top reasons": "Market price signal only; team/player/context data may be unavailable.",
+                "Data Status": data_status,
+                "Top reasons": _signal_reason(data_status),
                 "Contradiction flags": contradiction_flags(line, edge),
             }
         )
     return deduplicate_betting_signals(signals)
+
+
+def research_data_status(context_data: dict[str, Any] | None) -> str:
+    if not context_data:
+        return "Odds-only"
+    quality = context_data.get("data_quality")
+    if quality in {
+        "Odds + team form",
+        "Odds + team/player/context",
+        "Partial — team mapping only",
+        "Partial — squad only",
+    }:
+        return quality
+    if quality == "Manual review required":
+        return quality
+    return "Odds-only"
+
+
+def _signal_reason(data_status: str) -> str:
+    if data_status in {"Partial — team mapping only", "Partial — squad only"}:
+        return "Live API-Football data is partial; keep signal conservative until fixture form loads."
+    if data_status == "Odds + team/player/context":
+        return "Odds signal with team, player, and context research attached; manually confirm Hard Rock FL."
+    if data_status == "Odds + team form":
+        return "Odds signal with team-form context; player/weather gaps keep confidence conservative."
+    if data_status == "Manual review required":
+        return "Research APIs returned partial or uncertain data; manual review required."
+    return "Market price signal only; team/player/context data may be unavailable."
 
 
 def deduplicate_betting_signals(signals: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -295,7 +385,10 @@ def deduplicate_betting_signals(signals: list[dict[str, Any]]) -> list[dict[str,
     return deduped
 
 
-def source_status_summary(found_lines: list[dict[str, Any]]) -> dict[str, str]:
+def source_status_summary(
+    found_lines: list[dict[str, Any]],
+    context_data: dict[str, Any] | None = None,
+) -> dict[str, str]:
     return {
         "Live odds": "Connected" if found_lines else "Not connected",
         "Exact Hard Rock FL": (
@@ -308,9 +401,16 @@ def source_status_summary(found_lines: list[dict[str, Any]]) -> dict[str, str]:
             if any(row["Generic Hard Rock Available"] == "Yes" for row in found_lines)
             else "Not available"
         ),
-        "Team/player data": "Placeholder",
+        "Team/player data": _status_card_research_label(context_data),
         "Manual confirmation": "Required",
     }
+
+
+def _status_card_research_label(context_data: dict[str, Any] | None) -> str:
+    status = research_data_status(context_data)
+    if status in {"Partial — team mapping only", "Partial — squad only"}:
+        return "Partial"
+    return status
 
 
 def coverage_counts(

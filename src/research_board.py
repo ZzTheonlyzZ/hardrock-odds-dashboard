@@ -302,6 +302,9 @@ def build_ai_research_package(
     player_research: list[dict[str, Any]] | None = None,
     contextual_factors: list[dict[str, Any]] | None = None,
     betting_signals: list[dict[str, Any]] | None = None,
+    integration_diagnostics: dict[str, Any] | None = None,
+    team_mappings: dict[str, Any] | None = None,
+    missing_data: list[Any] | None = None,
 ) -> dict[str, Any]:
     hardrock_fl = [
         row for row in found_lines if row["Hard Rock FL Available"] == "Yes"
@@ -398,6 +401,9 @@ def build_ai_research_package(
         "player_research": player_research or [],
         "contextual_factors": contextual_factors or [],
         "betting_signals": betting_signals or [],
+        "integration_diagnostics": integration_diagnostics or {},
+        "team_mappings": team_mappings or {},
+        "missing_data": missing_data or [],
         "hard_rock_fl_markets": hardrock_fl,
         "generic_hard_rock_markets": generic,
         "market_consensus": consensus,
@@ -426,6 +432,14 @@ def build_ai_research_package(
             "Missing referee": [{"Status": "Unavailable - API key missing"}],
             "Unsupported markets": missing_markets,
             "API quota limits": api_usage or [],
+            "Live integration diagnostics": [
+                {"Diagnostic": key, "Value": value}
+                for key, value in (integration_diagnostics or {}).items()
+            ],
+            "Missing live research data": [
+                {"Status": value}
+                for value in (missing_data or [])
+            ],
         },
         "chatgpt_analysis_template": [
             "Potential value bets.",
@@ -629,6 +643,20 @@ def ai_package_to_markdown(package: dict[str, Any]) -> str:
     lines.append(_markdown_table(_quant_report_rows(package["quantitative_analysis"])))
 
     lines.extend(["", "## Team Research"])
+    if package.get("team_mappings"):
+        lines.append("### API-Football Team ID Mappings")
+        lines.append(
+            _markdown_table(
+                [
+                    {
+                        "Team": team,
+                        "API-Football team ID": values.get("id"),
+                        "Matched name": values.get("matched_name"),
+                    }
+                    for team, values in package["team_mappings"].items()
+                ]
+            )
+        )
     lines.append(_markdown_table(package["team_research"]) if package["team_research"] else "Unavailable - API key missing.")
 
     lines.extend(["", "## Player Research"])
@@ -636,6 +664,23 @@ def ai_package_to_markdown(package: dict[str, Any]) -> str:
 
     lines.extend(["", "## Contextual Factors"])
     lines.append(_markdown_table(package["contextual_factors"]) if package["contextual_factors"] else "Unavailable - API key missing.")
+
+    lines.extend(["", "## Live Integration Diagnostics"])
+    diagnostics = package.get("integration_diagnostics") or {}
+    lines.append(
+        _markdown_table(
+            [{"Diagnostic": key, "Value": value} for key, value in diagnostics.items()]
+        )
+        if diagnostics
+        else "No live integration diagnostics captured."
+    )
+    missing_data = package.get("missing_data") or []
+    lines.extend(["", "### Missing Data List"])
+    lines.append(
+        _markdown_table([{"Status": item} for item in missing_data])
+        if missing_data
+        else "None."
+    )
 
     lines.extend(["", "## Betting Signals"])
     lines.append(_markdown_table(package["betting_signals"]) if package["betting_signals"] else "No betting signals generated.")
