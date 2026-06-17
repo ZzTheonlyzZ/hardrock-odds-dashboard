@@ -66,6 +66,7 @@ class ResearchBetCard:
     fractional_kelly: float
     kelly_stake: float
     stake: float
+    notes: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -242,6 +243,15 @@ def build_hardrock_coverage_scan(
                         if source_row
                         else None
                     ),
+                    "source_type": source_used,
+                    "source_name": source_label,
+                    "confidence": confidence,
+                    "last_updated": "",
+                    "is_manual": False,
+                    "is_hardrock_fl": bool(fl_row),
+                    "is_generic_hardrock": bool(generic_row),
+                    "is_consensus": bool(consensus),
+                    "needs_manual_confirmation": True,
                 }
             )
 
@@ -287,6 +297,11 @@ def build_ai_research_package(
     manual_entries: list[dict[str, Any]],
     bankroll: float,
     kelly_multiplier: float,
+    api_usage: list[dict[str, Any]] | None = None,
+    team_research: list[dict[str, Any]] | None = None,
+    player_research: list[dict[str, Any]] | None = None,
+    contextual_factors: list[dict[str, Any]] | None = None,
+    betting_signals: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     hardrock_fl = [
         row for row in found_lines if row["Hard Rock FL Available"] == "Yes"
@@ -378,6 +393,11 @@ def build_ai_research_package(
         },
         "game_information": game_info,
         "source_coverage": source_coverage,
+        "api_usage": api_usage or [],
+        "team_research": team_research or [],
+        "player_research": player_research or [],
+        "contextual_factors": contextual_factors or [],
+        "betting_signals": betting_signals or [],
         "hard_rock_fl_markets": hardrock_fl,
         "generic_hard_rock_markets": generic,
         "market_consensus": consensus,
@@ -399,6 +419,13 @@ def build_ai_research_package(
                 if row["Generic Hard Rock Available"] == "No"
             ],
             "Markets requiring manual verification": missing_fl + missing_markets,
+            "Missing players": [] if player_research else [{"Status": "Unavailable - API key missing"}],
+            "Missing lineups": [{"Status": "Player prop requires confirmed lineup."}],
+            "Missing injuries": [] if player_research else [{"Status": "Unavailable - API key missing"}],
+            "Missing weather": [] if contextual_factors else [{"Status": "Unavailable - venue coordinates/API missing"}],
+            "Missing referee": [{"Status": "Unavailable - API key missing"}],
+            "Unsupported markets": missing_markets,
+            "API quota limits": api_usage or [],
         },
         "chatgpt_analysis_template": [
             "Potential value bets.",
@@ -555,6 +582,8 @@ def ai_package_to_markdown(package: dict[str, Any]) -> str:
     lines.append("")
     for key, value in package["source_summary"].items():
         lines.append(f"- {key}: {value}")
+    lines.extend(["", "### API Usage / Quota Status"])
+    lines.append(_markdown_table(package["api_usage"]) if package["api_usage"] else "No API usage headers captured.")
 
     lines.extend(["", "## Section 3 - Hard Rock FL Markets"])
     lines.append(
@@ -598,6 +627,18 @@ def ai_package_to_markdown(package: dict[str, Any]) -> str:
 
     lines.extend(["", "## Section 7 - Quantitative Analysis"])
     lines.append(_markdown_table(_quant_report_rows(package["quantitative_analysis"])))
+
+    lines.extend(["", "## Team Research"])
+    lines.append(_markdown_table(package["team_research"]) if package["team_research"] else "Unavailable - API key missing.")
+
+    lines.extend(["", "## Player Research"])
+    lines.append(_markdown_table(package["player_research"]) if package["player_research"] else "Unavailable - API key missing.")
+
+    lines.extend(["", "## Contextual Factors"])
+    lines.append(_markdown_table(package["contextual_factors"]) if package["contextual_factors"] else "Unavailable - API key missing.")
+
+    lines.extend(["", "## Betting Signals"])
+    lines.append(_markdown_table(package["betting_signals"]) if package["betting_signals"] else "No betting signals generated.")
 
     lines.extend(["", "## Section 8 - Bet Rankings"])
     lines.append("### TOP 5 POTENTIAL VALUE BETS")
@@ -971,6 +1012,7 @@ def build_research_card(
     kelly_multiplier: float,
     bookmaker_key: str | None = None,
     manual: bool = False,
+    notes: str = "",
 ) -> ResearchBetCard:
     if not selection.strip():
         raise ValueError("Selection is required.")
@@ -1005,4 +1047,5 @@ def build_research_card(
         fractional_kelly=fractional_kelly,
         kelly_stake=max(0.0, bankroll * fractional_kelly),
         stake=stake,
+        notes=notes,
     )

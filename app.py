@@ -54,6 +54,14 @@ from src.research_board import (
     markets_missing_from_hardrock_fl,
     source_summary,
 )
+from src.research_lab import (
+    build_betting_signals,
+    coverage_counts,
+    default_api_usage_rows,
+    source_status_summary,
+    request_budget_preview,
+    unavailable_research_snapshot,
+)
 from src.ui_components import (
     bets_to_dataframe,
     format_currency,
@@ -72,7 +80,7 @@ DEBUG_MODE = False
 
 MAIN_NAVIGATION = [
     "Home",
-    "Research Board",
+    "Research Lab",
     "Manual Entry",
     "Bet Cards",
     "Parlay Builder",
@@ -99,11 +107,13 @@ def initialize_session_state() -> None:
     if "hardrock_feed_mode" not in st.session_state:
         st.session_state.hardrock_feed_mode = "Florida only"
     if "navigation_page" not in st.session_state:
-        st.session_state.navigation_page = "Research Board"
+        st.session_state.navigation_page = "Research Lab"
+    if st.session_state.navigation_page == "Research Board":
+        st.session_state.navigation_page = "Research Lab"
     if st.session_state.navigation_page not in MAIN_NAVIGATION + DEBUG_NAVIGATION:
-        st.session_state.navigation_page = "Research Board"
+        st.session_state.navigation_page = "Research Lab"
     if not DEBUG_MODE and st.session_state.navigation_page in DEBUG_NAVIGATION:
-        st.session_state.navigation_page = "Research Board"
+        st.session_state.navigation_page = "Research Lab"
     if "odds_board_data" not in st.session_state:
         st.session_state.odds_board_data = None
     if "stage3_market_data" not in st.session_state:
@@ -128,6 +138,8 @@ def initialize_session_state() -> None:
         st.session_state.ai_package = None
     if "research_cards" not in st.session_state:
         st.session_state.research_cards = []
+    if "research_context_data" not in st.session_state:
+        st.session_state.research_context_data = unavailable_research_snapshot()
     manual_defaults = {
         "manual_sport": SUPPORTED_STAGE_1_SPORTS[0],
         "manual_event": "",
@@ -190,14 +202,14 @@ def load_bookmaker_diagnostics(
 
 def render_home_page() -> None:
     st.title(APP_NAME)
-    st.caption("Research Board first, with Stage 1 through Stage 3 calculations preserved")
+    st.caption("Research Lab first, with Stage 1 through Stage 3 calculations preserved")
     render_warning_box()
 
     st.markdown(
         """
         ### What this app does
 
-        Use the Research Board as the main workflow:
+        Use the Research Lab as the main workflow:
         Sport → Game → Market Category → Specific Market → Source Summary → Lines →
         Manual Entry → EV/Kelly → Bet Card.
 
@@ -261,12 +273,17 @@ def render_research_card(card: dict, index: int) -> None:
 
 
 def render_research_board_page() -> None:
-    st.title("Research Board")
+    st.title("Research Lab")
     render_warning_box()
+    st.warning(
+        "Potential value bets only. Manual confirmation required in the Hard Rock "
+        "Florida app. Sports betting is high variance and results are not guaranteed. "
+        "Past performance does not predict future results. Only risk money you can afford to lose."
+    )
     st.info(
-        "Sport -> Game -> Market Category -> Specific Market -> Source Summary -> "
-        "Lines -> Manual Entry -> EV/Kelly -> Bet Card. This app does not auto-bet, "
-        "scrape Hard Rock, or log into any sportsbook."
+        "Step 1: Select Game -> Step 2: Scan Markets -> Step 3: Review Source "
+        "Coverage -> Step 4: Review Research Data -> Step 5: Review Betting "
+        "Signals -> Step 6: Export Package"
     )
 
     try:
@@ -318,6 +335,64 @@ def render_research_board_page() -> None:
     }
     event_label = st.selectbox("Research event / game", options=list(event_by_label))
     selected_event = event_by_label[event_label]
+    current_scanner = st.session_state.research_scanner_data
+    current_lines = (
+        current_scanner["found_lines"]
+        if current_scanner and current_scanner["event_id"] == selected_event["id"]
+        else []
+    )
+    status_cards = source_status_summary(current_lines)
+    status_cols = st.columns(5)
+    for column, (label, value) in zip(status_cols, status_cards.items()):
+        column.metric(label, value)
+
+    groups = list(dict.fromkeys(template.group for template in SOCCER_MARKET_TEMPLATES))
+    market_group = st.selectbox("Market category", options=groups)
+    templates = [
+        template
+        for template in SOCCER_MARKET_TEMPLATES
+        if template.group == market_group
+    ]
+    specific_market = st.selectbox(
+        "Specific market",
+        options=[template.name for template in templates],
+    )
+    template = create_market_template(specific_market)
+
+    if st.button("Load odds / source availability"):
+        outcomes = []
+        errors = []
+        for api_market_key in template.api_market_keys:
+            try:
+                market_data = load_bookmaker_diagnostics(
+                    api_key,
+                    events_data["sport_key"],
+                    api_market_key,
+                )
+            except OddsApiError as exc:
+                errors.append(str(exc))
+                continue
+            matching_event = next(
+                (
+                    event
+                    for event in market_data["events"]
+                    if event["id"] == selected_event["id"]
+                ),
+                None,
+            )
+            if matching_event:
+                outcomes.extend(matching_event["outcomes"])
+
+        rows = enrich_odds_rows(outcomes)
+        st.session_state.research_market_data = {
+            "event_id": selected_event["id"],
+            "event": selected_event["event"],
+            "sport": events_data["sport_title"],
+            "market": specific_market,
+            "rows": rows,
+            "outcomes": outcomes,
+            "errors": errors,
+        }
 
     all_templates = list(SOCCER_MARKET_TEMPLATES)
     if st.button("Scan Hard Rock Markets"):
@@ -373,306 +448,469 @@ def render_research_board_page() -> None:
 
     scanner_data = st.session_state.research_scanner_data
     if scanner_data and scanner_data["event_id"] == selected_event["id"]:
-        st.subheader("Hard Rock Market Coverage")
-        if scanner_data["errors"]:
-            st.warning(
-                "Some API market checks failed. Available results are still shown."
-            )
-            with st.expander("Scanner API errors"):
-                for error in scanner_data["errors"]:
-                    st.write(error)
-
         found_lines = list(scanner_data["found_lines"])
-        scanner_filter = st.radio(
-            "Hard Rock coverage filter",
+        missing_fl = markets_missing_from_hardrock_fl(found_lines)
+        api_usage_rows = default_api_usage_rows()
+        context_data = st.session_state.research_context_data
+        betting_signals = build_betting_signals(
+            found_lines,
+            bankroll=float(st.session_state.bankroll),
+            kelly_multiplier=float(st.session_state.kelly_multiplier),
+        )
+        lab_tabs = st.tabs(
             [
-                "Show all Hard Rock lines",
-                "Exact FL only",
-                "Generic Hard Rock only",
-                "Markets missing FL but found generic",
-            ],
-            horizontal=True,
-        )
-        category_options = ["All categories"] + sorted(
-            {row["Market Category"] for row in found_lines}
-        )
-        scanner_category = st.selectbox(
-            "Scanner market category filter",
-            options=category_options,
+                "Market Coverage",
+                "Research Data",
+                "Betting Signals",
+                "Lottery Builder",
+                "Export Package",
+                "API / Diagnostics",
+            ]
         )
 
-        filtered_lines = found_lines
-        if scanner_filter == "Exact FL only":
-            filtered_lines = [
-                row
-                for row in filtered_lines
-                if row["Hard Rock FL Available"] == "Yes"
-            ]
-        elif scanner_filter == "Generic Hard Rock only":
-            filtered_lines = [
-                row
-                for row in filtered_lines
-                if row["Generic Hard Rock Available"] == "Yes"
-            ]
-        elif scanner_filter == "Markets missing FL but found generic":
-            filtered_lines = [
-                row
-                for row in filtered_lines
-                if row["Hard Rock FL Available"] == "No"
-                and row["Generic Hard Rock Available"] == "Yes"
-            ]
-        if scanner_category != "All categories":
-            filtered_lines = [
-                row
-                for row in filtered_lines
-                if row["Market Category"] == scanner_category
-            ]
-
-        coverage_columns = [
-            "Market Category",
-            "Specific Market",
-            "Selection",
-            "Point / Line",
-            "Hard Rock FL Odds",
-            "Generic Hard Rock Odds",
-            "Consensus Odds",
-            "Hard Rock FL Available",
-            "Generic Hard Rock Available",
-            "Consensus Available",
-            "Confidence Label",
-            "Source Label",
-            "Difference",
-        ]
-        if filtered_lines:
-            st.dataframe(
-                pd.DataFrame(filtered_lines)[coverage_columns],
-                use_container_width=True,
-                hide_index=True,
+        with lab_tabs[0]:
+            st.subheader("Hard Rock Market Coverage")
+            counts = coverage_counts(
+                found_lines,
+                missing_fl,
+                scanner_data["missing_markets"],
             )
-            for index, line in enumerate(filtered_lines):
-                point_text = (
-                    f" | {line['Point / Line']:+g}"
-                    if line["Point / Line"] is not None
-                    else ""
+            count_cols = st.columns(6)
+            for column, (label, value) in zip(count_cols, counts.items()):
+                column.metric(label, value)
+
+            scanner_filter = st.radio(
+                "Hard Rock coverage filter",
+                [
+                    "Show all Hard Rock lines",
+                    "Exact FL only",
+                    "Generic Hard Rock only",
+                    "Markets missing FL but found generic",
+                ],
+                horizontal=True,
+            )
+            category_options = ["All categories"] + sorted(
+                {row["Market Category"] for row in found_lines}
+            )
+            scanner_category = st.selectbox(
+                "Scanner market category filter",
+                options=category_options,
+            )
+
+            filtered_lines = found_lines
+            if scanner_filter == "Exact FL only":
+                filtered_lines = [
+                    row
+                    for row in filtered_lines
+                    if row["Hard Rock FL Available"] == "Yes"
+                ]
+            elif scanner_filter == "Generic Hard Rock only":
+                filtered_lines = [
+                    row
+                    for row in filtered_lines
+                    if row["Generic Hard Rock Available"] == "Yes"
+                ]
+            elif scanner_filter == "Markets missing FL but found generic":
+                filtered_lines = [
+                    row
+                    for row in filtered_lines
+                    if row["Hard Rock FL Available"] == "No"
+                    and row["Generic Hard Rock Available"] == "Yes"
+                ]
+            if scanner_category != "All categories":
+                filtered_lines = [
+                    row
+                    for row in filtered_lines
+                    if row["Market Category"] == scanner_category
+                ]
+
+            coverage_columns = [
+                "Market Category",
+                "Specific Market",
+                "Selection",
+                "Point / Line",
+                "Hard Rock FL Odds",
+                "Generic Hard Rock Odds",
+                "Consensus Odds",
+                "Hard Rock FL Available",
+                "Generic Hard Rock Available",
+                "Consensus Available",
+                "Confidence Label",
+                "Source Label",
+                "Warning",
+            ]
+            display_lines = [
+                {
+                    **row,
+                    "Warning": (
+                        "Confirm manually in Hard Rock Florida before betting."
+                        if row["Hard Rock FL Available"] == "No"
+                        else "Manual confirmation still required."
+                    ),
+                }
+                for row in filtered_lines
+            ]
+            if display_lines:
+                st.dataframe(
+                    pd.DataFrame(display_lines)[coverage_columns],
+                    use_container_width=True,
+                    hide_index=True,
                 )
-                st.write(
-                    f"**{line['Specific Market']}** | {line['Selection']}"
-                    f"{point_text} | {line['Odds']:+d} | {line['Source used']}"
+                with st.expander("Advanced row metadata"):
+                    metadata_columns = [
+                        "source_type",
+                        "source_name",
+                        "confidence",
+                        "last_updated",
+                        "is_manual",
+                        "is_hardrock_fl",
+                        "is_generic_hardrock",
+                        "is_consensus",
+                        "needs_manual_confirmation",
+                    ]
+                    st.dataframe(
+                        pd.DataFrame(display_lines)[metadata_columns],
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+                line_by_label = {
+                    (
+                        f"{line['Specific Market']} | {line['Selection']} | "
+                        f"{line['Odds']:+d} | {line['Source Label']}"
+                    ): line
+                    for line in display_lines
+                }
+                line_label = st.selectbox(
+                    "Select line to create research card",
+                    options=list(line_by_label),
                 )
-                if st.button(
-                    "Create research card from this line",
-                    key=f"scanner-card-{selected_event['id']}-{index}",
-                ):
+                selected_line = line_by_label[line_label]
+                if st.button("Create research card from selected line"):
                     card = build_research_card(
                         sport=scanner_data["sport"],
                         event=scanner_data["event"],
-                        market=line["Specific Market"],
-                        selection=line["Selection"],
-                        point=line["Point / Line"],
-                        american_odds=line["Odds"],
+                        market=selected_line["Specific Market"],
+                        selection=selected_line["Selection"],
+                        point=selected_line["Point / Line"],
+                        american_odds=selected_line["Odds"],
                         estimated_probability=american_to_implied_probability(
-                            line["Odds"]
+                            selected_line["Odds"]
                         ),
                         no_vig_probability=None,
                         stake=float(st.session_state.default_stake),
                         bankroll=float(st.session_state.bankroll),
                         kelly_multiplier=float(st.session_state.kelly_multiplier),
-                        bookmaker_key=line["bookmaker_key"],
+                        bookmaker_key=selected_line["bookmaker_key"],
                     )
                     st.session_state.research_cards.append(card.to_dict())
                     st.success("Research card created from scanned Hard Rock line.")
-        else:
-            st.info(
-                "No Hard Rock API lines match the current scanner filters. If the "
-                "market is visible in the Hard Rock Florida app, use Manual Hard "
-                "Rock FL Entry and compare against market consensus."
-            )
-
-        st.subheader("Markets Missing From Hard Rock FL")
-        missing_fl = markets_missing_from_hardrock_fl(found_lines)
-        if missing_fl:
-            st.warning("Verify manually inside Hard Rock Florida before using this market.")
-            st.dataframe(
-                pd.DataFrame(missing_fl),
-                use_container_width=True,
-                hide_index=True,
-            )
-        else:
-            st.success("No scanned generic or consensus markets are missing Hard Rock FL.")
-
-        st.subheader("Hard Rock markets not found")
-        if scanner_data["missing_markets"]:
-            st.dataframe(
-                pd.DataFrame(scanner_data["missing_markets"]),
-                use_container_width=True,
-                hide_index=True,
-            )
-            st.info(
-                "These markets were not returned by The Odds API for hardrockbet_fl "
-                "or hardrockbet. If you see one in the real app, use Manual Hard "
-                "Rock FL Entry."
-            )
-        else:
-            st.success("Every mapped market returned at least one Hard Rock API line.")
-
-        if st.button("Generate AI Research Package"):
-            date_value = scanner_data["commence_time"]
-            date_part = date_value.split("T", 1)[0] if "T" in date_value else date_value
-            time_part = (
-                date_value.split("T", 1)[1].replace("Z", "")
-                if "T" in date_value
-                else "Unavailable"
-            )
-            manual_entries = [
-                {
-                    "Market": card["market"],
-                    "Selection": card["selection"],
-                    "Point": card.get("point"),
-                    "Odds": card["american_odds"],
-                    "User notes": "",
-                    "Confidence": "HIGHEST CONFIDENCE - USER VERIFIED",
-                }
-                for card in st.session_state.research_cards
-                if card.get("source_type") == "Manual Hard Rock FL Entry"
-            ]
-            package = build_ai_research_package(
-                game_info={
-                    "Sport": scanner_data["sport"],
-                    "League": scanner_data["sport"],
-                    "Competition stage": "Unavailable",
-                    "Event": scanner_data["event"],
-                    "Date": date_part,
-                    "Time": time_part,
-                    "Home team": scanner_data["home_team"],
-                    "Away team": scanner_data["away_team"],
-                    "Venue": "Unavailable",
-                    "Timezone": "UTC",
-                },
-                found_lines=found_lines,
-                missing_markets=scanner_data["missing_markets"],
-                manual_entries=manual_entries,
-                bankroll=float(st.session_state.bankroll),
-                kelly_multiplier=float(st.session_state.kelly_multiplier),
-            )
-            st.session_state.ai_package = package
-            st.session_state.ai_package_markdown = ai_package_to_markdown(package)
-
-        package = st.session_state.get("ai_package")
-        if package:
-            markdown_package = st.session_state.ai_package_markdown
-            chatgpt_package = chatgpt_analysis_package_to_markdown(package)
-            st.subheader("AI Research Package")
-            st.text_area(
-                "Copy AI Package",
-                value=markdown_package,
-                height=360,
-            )
-            components.html(
-                f"""
-                <button
-                    type="button"
-                    onclick='navigator.clipboard.writeText({json.dumps(markdown_package)})'
-                    style="
-                        border: 1px solid #d0d7de;
-                        border-radius: 6px;
-                        padding: 8px 12px;
-                        background: #f6f8fa;
-                        color: #24292f;
-                        cursor: pointer;
-                        font: 14px sans-serif;
-                    "
-                >
-                    Copy AI Package
-                </button>
-                """,
-                height=46,
-            )
-
-            st.download_button(
-                "Download TXT",
-                data=ai_package_to_txt(package),
-                file_name="ai_research_package.txt",
-                mime="text/plain",
-            )
-            st.download_button(
-                "Download Markdown",
-                data=markdown_package,
-                file_name="ai_research_package.md",
-                mime="text/markdown",
-            )
-            st.download_button(
-                "Download CSV",
-                data=ai_package_to_csv(package),
-                file_name="ai_research_package.csv",
-                mime="text/csv",
-            )
-            st.download_button(
-                "Download JSON",
-                data=ai_package_to_json(package),
-                file_name="ai_research_package.json",
-                mime="application/json",
-            )
-
-            st.subheader("ChatGPT Analysis Package")
-            st.text_area(
-                "ChatGPT Analysis Package",
-                value=chatgpt_package,
-                height=300,
-            )
-            st.download_button(
-                "Download ChatGPT Analysis Package",
-                data=chatgpt_package,
-                file_name="chatgpt_analysis_package.md",
-                mime="text/markdown",
-            )
-
-    groups = list(dict.fromkeys(template.group for template in SOCCER_MARKET_TEMPLATES))
-    market_group = st.selectbox("Market category", options=groups)
-    templates = [
-        template
-        for template in SOCCER_MARKET_TEMPLATES
-        if template.group == market_group
-    ]
-    specific_market = st.selectbox(
-        "Specific market",
-        options=[template.name for template in templates],
-    )
-    template = create_market_template(specific_market)
-
-    if st.button("Load odds / source availability"):
-        outcomes = []
-        errors = []
-        for api_market_key in template.api_market_keys:
-            try:
-                market_data = load_bookmaker_diagnostics(
-                    api_key,
-                    events_data["sport_key"],
-                    api_market_key,
+            else:
+                st.info(
+                    "No Hard Rock API lines match the current scanner filters. If the "
+                    "market is visible in the Hard Rock Florida app, use Manual Hard "
+                    "Rock FL Entry and compare against market consensus."
                 )
-            except OddsApiError as exc:
-                errors.append(str(exc))
-                continue
-            matching_event = next(
-                (
-                    event
-                    for event in market_data["events"]
-                    if event["id"] == selected_event["id"]
-                ),
-                None,
-            )
-            if matching_event:
-                outcomes.extend(matching_event["outcomes"])
 
-        rows = enrich_odds_rows(outcomes)
-        st.session_state.research_market_data = {
-            "event_id": selected_event["id"],
-            "event": selected_event["event"],
-            "sport": events_data["sport_title"],
-            "market": specific_market,
-            "rows": rows,
-            "outcomes": outcomes,
-            "errors": errors,
-        }
+            with st.expander(
+                "Markets missing from Hard Rock FL / manual entry required",
+                expanded=bool(missing_fl),
+            ):
+                st.warning("Verify manually inside Hard Rock Florida before using this market.")
+                if missing_fl:
+                    st.dataframe(pd.DataFrame(missing_fl), use_container_width=True, hide_index=True)
+                else:
+                    st.success("No scanned generic or consensus markets are missing Hard Rock FL.")
+                if scanner_data["missing_markets"]:
+                    st.dataframe(
+                        pd.DataFrame(scanner_data["missing_markets"]),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+                else:
+                    st.success("Every mapped market returned at least one API line.")
+
+        with lab_tabs[1]:
+            st.info(
+                "Stage 4A: Research Lab scaffold active. Team/player/context "
+                "integrations are placeholders until live API clients are added."
+            )
+            st.warning(
+                "Live team/player/context integrations are not connected yet. "
+                "Placeholder fields are shown for manual review."
+            )
+            research_subtabs = st.tabs(["Team Form", "Player Research", "Context"])
+            with research_subtabs[0]:
+                st.subheader("Team Research Panel")
+                st.dataframe(pd.DataFrame(context_data["team_form"]), use_container_width=True, hide_index=True)
+            with research_subtabs[1]:
+                st.subheader("Player Research Panel")
+                st.dataframe(pd.DataFrame(context_data["players"]), use_container_width=True, hide_index=True)
+            with research_subtabs[2]:
+                st.subheader("Contextual Factors Panel")
+                st.dataframe(pd.DataFrame(context_data["context"]), use_container_width=True, hide_index=True)
+            st.info(
+                "Team/player/context data is not being used for final probability yet. "
+                "Current Betting Signal Panel is odds-only. Manual Hard Rock "
+                "confirmation is still required. Future Stage 4B will connect live team form."
+            )
+
+        with lab_tabs[2]:
+            st.info("Current signals are odds-based unless team/player/context integrations are connected.")
+            signal_counts = {
+                "Signals generated": len(betting_signals),
+                "Serious EV Bets": sum(s["Classification"] == "Serious EV Bet" for s in betting_signals),
+                "Small Edge Leans": sum(s["Classification"] == "Small Edge Lean" for s in betting_signals),
+                "Lottery Tickets": sum(s["Classification"] == "Lottery Ticket" for s in betting_signals),
+                "No Bets": sum(s["Classification"] == "No Bet" for s in betting_signals),
+                "Odds-only signals": sum(s["Data Status"] == "Odds only" for s in betting_signals),
+                "Signals requiring manual confirmation": sum(
+                    "Manual confirmation required" in s["Contradiction flags"]
+                    for s in betting_signals
+                ),
+            }
+            signal_cols = st.columns(4)
+            for index, (label, value) in enumerate(signal_counts.items()):
+                signal_cols[index % 4].metric(label, value)
+
+            signal_filter = st.radio(
+                "Signal filter",
+                [
+                    "Show all",
+                    "Serious EV only",
+                    "Small edge only",
+                    "Lottery only",
+                    "No Bet only",
+                    "Manual confirmation required",
+                ],
+                horizontal=True,
+            )
+            filtered_signals = betting_signals
+            signal_map = {
+                "Serious EV only": "Serious EV Bet",
+                "Small edge only": "Small Edge Lean",
+                "Lottery only": "Lottery Ticket",
+                "No Bet only": "No Bet",
+            }
+            if signal_filter in signal_map:
+                filtered_signals = [
+                    signal
+                    for signal in filtered_signals
+                    if signal["Classification"] == signal_map[signal_filter]
+                ]
+            elif signal_filter == "Manual confirmation required":
+                filtered_signals = [
+                    signal
+                    for signal in filtered_signals
+                    if "Manual confirmation required" in signal["Contradiction flags"]
+                ]
+
+            st.subheader("Betting Signal Panel")
+            if filtered_signals:
+                st.dataframe(pd.DataFrame(filtered_signals), use_container_width=True, hide_index=True)
+                signal_by_label = {
+                    (
+                        f"{signal['Classification']} | {signal['Selection']} | "
+                        f"{signal['American odds']:+d} | {signal['Sportsbook/source']}"
+                    ): signal
+                    for signal in filtered_signals
+                }
+                selected_signal_label = st.selectbox("Select signal", options=list(signal_by_label))
+                action = st.selectbox(
+                    "Selected signal action",
+                    ["Create research card", "Create bet card", "Add to lottery builder"],
+                )
+                if st.button("Apply selected signal action"):
+                    st.info(f"{action} is queued for manual review. Confirm the exact Hard Rock FL line first.")
+            else:
+                st.info("No betting signals match the current filter. No bet if edge is unclear.")
+
+        with lab_tabs[3]:
+            st.subheader("Lottery Script Builder")
+            st.info(
+                "Lottery mode is for small high-variance tickets only. The goal is "
+                "not to find safe bets; the goal is to build one coherent game script."
+            )
+            lottery_col1, lottery_col2, lottery_col3 = st.columns(3)
+            with lottery_col1:
+                lottery_stake = st.number_input("Lottery stake", min_value=0.1, value=1.0, step=0.5)
+            with lottery_col2:
+                target_payout = st.number_input("Target payout", min_value=1.0, value=100.0, step=5.0)
+            with lottery_col3:
+                script_type = st.selectbox(
+                    "Script type",
+                    [
+                        "Favorite domination",
+                        "Underdog keeps it close",
+                        "Low-scoring defensive game",
+                        "High-tempo goals/corners game",
+                        "Player-led script",
+                        "Cards/physical match script",
+                    ],
+                )
+            st.warning(
+                "Lottery scripts are high variance. Do not multiply probabilities blindly; "
+                "SGP/parlay probability must account for correlation."
+            )
+            st.info(
+                "Suggested legs will be stronger after team/player/context integrations "
+                "are connected. For now, use manual Hard Rock FL confirmation."
+            )
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {
+                            "Script type": script_type,
+                            "Target stake": lottery_stake,
+                            "Target payout": target_payout,
+                            "Correlation": "Unknown",
+                            "Classification": "Lottery Ticket",
+                            "Warning": "Manual confirmation required for every leg.",
+                        }
+                    ]
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        with lab_tabs[4]:
+            st.subheader("Export Package")
+            readiness = {
+                "Game selected": "Yes",
+                "Markets scanned": "Yes" if found_lines else "No",
+                "Odds data available": "Yes" if found_lines else "No",
+                "Exact Hard Rock FL available": "Yes" if any(row["Hard Rock FL Available"] == "Yes" for row in found_lines) else "No",
+                "Generic Hard Rock available": "Yes" if any(row["Generic Hard Rock Available"] == "Yes" for row in found_lines) else "No",
+                "Team/player/context data": "Placeholder",
+                "Manual confirmation required": "Yes",
+            }
+            st.dataframe(pd.DataFrame([readiness]), use_container_width=True, hide_index=True)
+            st.info(
+                "Exports include odds source status, scaffold status for team/player/context, "
+                "generic Hard Rock warnings, manual confirmation requirements, and odds-only signal status."
+            )
+
+            if st.button("Generate AI Research Package"):
+                date_value = scanner_data["commence_time"]
+                date_part = date_value.split("T", 1)[0] if "T" in date_value else date_value
+                time_part = (
+                    date_value.split("T", 1)[1].replace("Z", "")
+                    if "T" in date_value
+                    else "Unavailable"
+                )
+                manual_entries = [
+                    {
+                        "Market": card["market"],
+                        "Selection": card["selection"],
+                        "Point": card.get("point"),
+                        "Odds": card["american_odds"],
+                        "User notes": card.get("notes", ""),
+                        "Confidence": "HIGHEST CONFIDENCE - USER VERIFIED",
+                    }
+                    for card in st.session_state.research_cards
+                    if card.get("source_type") == "Manual Hard Rock FL Entry"
+                ]
+                package = build_ai_research_package(
+                    game_info={
+                        "Sport": scanner_data["sport"],
+                        "League": scanner_data["sport"],
+                        "Competition stage": "Unavailable",
+                        "Event": scanner_data["event"],
+                        "Date": date_part,
+                        "Time": time_part,
+                        "Home team": scanner_data["home_team"],
+                        "Away team": scanner_data["away_team"],
+                        "Venue": "Unavailable",
+                        "Timezone": "UTC",
+                    },
+                    found_lines=found_lines,
+                    missing_markets=scanner_data["missing_markets"],
+                    manual_entries=manual_entries,
+                    bankroll=float(st.session_state.bankroll),
+                    kelly_multiplier=float(st.session_state.kelly_multiplier),
+                    api_usage=api_usage_rows,
+                    team_research=context_data["team_form"],
+                    player_research=context_data["players"],
+                    contextual_factors=context_data["context"],
+                    betting_signals=betting_signals,
+                )
+                st.session_state.ai_package = package
+                st.session_state.ai_package_markdown = ai_package_to_markdown(package)
+
+            package = st.session_state.get("ai_package")
+            if package:
+                markdown_package = st.session_state.ai_package_markdown
+                chatgpt_package = chatgpt_analysis_package_to_markdown(package)
+                with st.expander("Preview AI Research Package"):
+                    st.text_area("Copy AI Package", value=markdown_package, height=360)
+                components.html(
+                    f"""
+                    <button
+                        type="button"
+                        onclick='navigator.clipboard.writeText({json.dumps(markdown_package)})'
+                        style="border:1px solid #d0d7de;border-radius:6px;padding:8px 12px;background:#f6f8fa;color:#24292f;cursor:pointer;font:14px sans-serif;"
+                    >
+                        Copy AI Package
+                    </button>
+                    """,
+                    height=46,
+                )
+                st.download_button("Download TXT", data=ai_package_to_txt(package), file_name="ai_research_package.txt", mime="text/plain")
+                st.download_button("Download Markdown", data=markdown_package, file_name="ai_research_package.md", mime="text/markdown")
+                st.download_button("Download CSV", data=ai_package_to_csv(package), file_name="ai_research_package.csv", mime="text/csv")
+                st.download_button("Download JSON", data=ai_package_to_json(package), file_name="ai_research_package.json", mime="application/json")
+                if st.button("Generate ChatGPT Analysis Package"):
+                    st.session_state.chatgpt_package_markdown = chatgpt_package
+                st.text_area("ChatGPT Analysis Package", value=chatgpt_package, height=300)
+                st.download_button("Download ChatGPT Analysis Package", data=chatgpt_package, file_name="chatgpt_analysis_package.md", mime="text/markdown")
+
+        with lab_tabs[5]:
+            st.subheader("API Usage Monitor")
+            st.dataframe(pd.DataFrame(api_usage_rows), use_container_width=True, hide_index=True)
+            st.subheader("Request Budget Preview")
+            budget_mode = st.radio(
+                "Research load mode",
+                [
+                    "Load basic research only",
+                    "Load full research",
+                    "Load player props research",
+                    "Load weather/context only",
+                    "Generate AI package without extra API calls",
+                ],
+                horizontal=False,
+            )
+            budget_key = {
+                "Load basic research only": "basic",
+                "Load full research": "full",
+                "Load player props research": "player_props",
+                "Load weather/context only": "weather",
+                "Generate AI package without extra API calls": "package_only",
+            }[budget_mode]
+            st.dataframe(
+                pd.DataFrame(request_budget_preview(budget_key)),
+                use_container_width=True,
+                hide_index=True,
+            )
+            if st.button(budget_mode):
+                st.session_state.research_context_data = unavailable_research_snapshot(
+                    "Unavailable - API key missing or research load not configured"
+                )
+                st.success("Research context prepared without unsafe sportsbook automation.")
+            with st.expander("Scanner API errors / diagnostics"):
+                if scanner_data["errors"]:
+                    st.warning(
+                        "Some market checks were unavailable. Showing all results that were successfully returned."
+                    )
+                    for error in scanner_data["errors"]:
+                        st.write(error)
+                else:
+                    st.success("No scanner API errors captured.")
+            with st.expander("Raw API headers if captured"):
+                st.info("No raw API headers captured in this Streamlit session.")
+            with st.expander("Cache status"):
+                st.write(f"Last context update: {context_data.get('last_updated', 'Unknown')}")
+            with st.expander("Missing API keys"):
+                st.write("API-Football, football-data.org, and weather integrations are scaffolded placeholders.")
 
     board = st.session_state.research_market_data
     if (
@@ -834,7 +1072,8 @@ def render_research_board_page() -> None:
                 value=float(st.session_state.default_stake),
                 step=0.5,
             )
-            submitted = st.form_submit_button("Create Research Board bet card")
+            notes = st.text_area("Manual entry notes")
+            submitted = st.form_submit_button("Create Research Lab bet card")
 
         if submitted:
             no_vig_probability, _bookmaker_count = find_no_vig_probability(
@@ -856,12 +1095,13 @@ def render_research_board_page() -> None:
                     bankroll=float(st.session_state.bankroll),
                     kelly_multiplier=float(st.session_state.kelly_multiplier),
                     manual=True,
+                    notes=notes,
                 )
             except ValueError as exc:
                 st.error(str(exc))
             else:
                 st.session_state.research_cards.append(card.to_dict())
-                st.success("Research Board bet card created.")
+                st.success("Research Lab bet card created.")
 
     if rows:
         st.subheader("Create Card From API Line")
@@ -923,10 +1163,10 @@ def render_research_board_page() -> None:
                 bookmaker_key=api_line["bookmaker_key"],
             )
             st.session_state.research_cards.append(card.to_dict())
-            st.success("API-sourced Research Board card created.")
+            st.success("API-sourced Research Lab card created.")
 
     if st.session_state.research_cards:
-        st.subheader("Research Board Bet Cards")
+        st.subheader("Research Lab Bet Cards")
         for index, card in enumerate(
             reversed(st.session_state.research_cards),
             start=1,
@@ -2005,9 +2245,9 @@ def main() -> None:
         st.metric("Current bet cards", len(st.session_state.bets))
         st.metric("Default stake", format_currency(st.session_state.default_stake))
         st.metric("Bankroll", format_currency(st.session_state.bankroll))
-        st.caption("Use Research Board as the main odds and value workflow.")
+        st.caption("Use Research Lab as the main odds, research, and export workflow.")
 
-    if page == "Research Board":
+    if page == "Research Lab":
         render_research_board_page()
     elif page == "Home":
         render_home_page()
