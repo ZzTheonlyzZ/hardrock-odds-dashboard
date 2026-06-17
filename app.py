@@ -210,7 +210,7 @@ def render_home_page() -> None:
         ### What this app does
 
         Use the Research Lab as the main workflow:
-        Sport → Game → Market Category → Specific Market → Source Summary → Lines →
+        Sport -> Game -> Market Category -> Specific Market -> Source Status -> Lines ->
         Manual Entry → EV/Kelly → Bet Card.
 
         It combines Hard Rock source availability, market consensus, manual line entry,
@@ -359,7 +359,14 @@ def render_research_board_page() -> None:
     )
     template = create_market_template(specific_market)
 
-    if st.button("Load odds / source availability"):
+    all_templates = list(SOCCER_MARKET_TEMPLATES)
+    action_col1, action_col2 = st.columns(2)
+    with action_col1:
+        load_market_clicked = st.button("Load odds / source availability")
+    with action_col2:
+        scan_markets_clicked = st.button("Scan Hard Rock Markets")
+
+    if load_market_clicked:
         outcomes = []
         errors = []
         for api_market_key in template.api_market_keys:
@@ -394,8 +401,7 @@ def render_research_board_page() -> None:
             "errors": errors,
         }
 
-    all_templates = list(SOCCER_MARKET_TEMPLATES)
-    if st.button("Scan Hard Rock Markets"):
+    if scan_markets_clicked:
         st.session_state.ai_package = None
         st.session_state.ai_package_markdown = ""
         outcomes_by_market = {}
@@ -452,6 +458,13 @@ def render_research_board_page() -> None:
         missing_fl = markets_missing_from_hardrock_fl(found_lines)
         api_usage_rows = default_api_usage_rows()
         context_data = st.session_state.research_context_data
+        compact_source_status = (
+            "Source status: "
+            f"Exact Hard Rock FL: {'Yes' if any(row['Hard Rock FL Available'] == 'Yes' for row in found_lines) else 'No'} | "
+            f"Generic Hard Rock: {'Yes' if any(row['Generic Hard Rock Available'] == 'Yes' for row in found_lines) else 'No'} | "
+            f"Consensus: {'Yes' if any(row['Consensus Available'] == 'Yes' for row in found_lines) else 'No'} | "
+            "Manual confirmation required."
+        )
         betting_signals = build_betting_signals(
             found_lines,
             bankroll=float(st.session_state.bankroll),
@@ -469,6 +482,8 @@ def render_research_board_page() -> None:
         )
 
         with lab_tabs[0]:
+            st.subheader("Source Summary")
+            st.info(compact_source_status)
             st.subheader("Hard Rock Market Coverage")
             counts = coverage_counts(
                 found_lines,
@@ -631,6 +646,7 @@ def render_research_board_page() -> None:
                     st.success("Every mapped market returned at least one API line.")
 
         with lab_tabs[1]:
+            st.caption(compact_source_status)
             st.info(
                 "Stage 4A: Research Lab scaffold active. Team/player/context "
                 "integrations are placeholders until live API clients are added."
@@ -726,6 +742,7 @@ def render_research_board_page() -> None:
                 st.info("No betting signals match the current filter. No bet if edge is unclear.")
 
         with lab_tabs[3]:
+            st.caption(compact_source_status)
             st.subheader("Lottery Script Builder")
             st.info(
                 "Lottery mode is for small high-variance tickets only. The goal is "
@@ -774,6 +791,7 @@ def render_research_board_page() -> None:
             )
 
         with lab_tabs[4]:
+            st.caption(compact_source_status)
             st.subheader("Export Package")
             readiness = {
                 "Game selected": "Yes",
@@ -790,7 +808,13 @@ def render_research_board_page() -> None:
                 "generic Hard Rock warnings, manual confirmation requirements, and odds-only signal status."
             )
 
-            if st.button("Generate AI Research Package"):
+            export_col1, export_col2 = st.columns(2)
+            with export_col1:
+                generate_ai_package = st.button("Generate AI Research Package")
+            with export_col2:
+                generate_chatgpt_package = st.button("Generate ChatGPT Analysis Package")
+
+            if generate_ai_package or generate_chatgpt_package:
                 date_value = scanner_data["commence_time"]
                 date_part = date_value.split("T", 1)[0] if "T" in date_value else date_value
                 time_part = (
@@ -836,11 +860,17 @@ def render_research_board_page() -> None:
                 )
                 st.session_state.ai_package = package
                 st.session_state.ai_package_markdown = ai_package_to_markdown(package)
+                st.session_state.chatgpt_package_markdown = (
+                    chatgpt_analysis_package_to_markdown(package)
+                )
 
             package = st.session_state.get("ai_package")
             if package:
                 markdown_package = st.session_state.ai_package_markdown
-                chatgpt_package = chatgpt_analysis_package_to_markdown(package)
+                chatgpt_package = st.session_state.get(
+                    "chatgpt_package_markdown",
+                    chatgpt_analysis_package_to_markdown(package),
+                )
                 with st.expander("Preview AI Research Package"):
                     st.text_area("Copy AI Package", value=markdown_package, height=360)
                 components.html(
@@ -859,12 +889,11 @@ def render_research_board_page() -> None:
                 st.download_button("Download Markdown", data=markdown_package, file_name="ai_research_package.md", mime="text/markdown")
                 st.download_button("Download CSV", data=ai_package_to_csv(package), file_name="ai_research_package.csv", mime="text/csv")
                 st.download_button("Download JSON", data=ai_package_to_json(package), file_name="ai_research_package.json", mime="application/json")
-                if st.button("Generate ChatGPT Analysis Package"):
-                    st.session_state.chatgpt_package_markdown = chatgpt_package
                 st.text_area("ChatGPT Analysis Package", value=chatgpt_package, height=300)
                 st.download_button("Download ChatGPT Analysis Package", data=chatgpt_package, file_name="chatgpt_analysis_package.md", mime="text/markdown")
 
         with lab_tabs[5]:
+            st.caption(compact_source_status)
             st.subheader("API Usage Monitor")
             st.dataframe(pd.DataFrame(api_usage_rows), use_container_width=True, hide_index=True)
             st.subheader("Request Budget Preview")
@@ -924,7 +953,7 @@ def render_research_board_page() -> None:
     rows = board["rows"]
     summary = source_summary(rows)
 
-    st.subheader("Source Summary")
+    st.subheader("Selected Market Source Details")
     col1, col2, col3, col4 = st.columns(4)
     col1.metric(
         "Exact Hard Rock FL available",
@@ -945,7 +974,7 @@ def render_research_board_page() -> None:
 
     st.markdown(
         """
-        **Coverage badges**
+        **Confidence guide**
         - Exact Hard Rock FL API: High confidence
         - Generic Hard Rock API: Medium confidence, may differ from Florida
         - Market Consensus / Other Books: Comparison only
