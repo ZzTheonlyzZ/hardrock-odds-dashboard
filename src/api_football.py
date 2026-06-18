@@ -12,7 +12,7 @@ from urllib.request import Request, urlopen
 from src.research_lab import parse_api_football_headers
 
 API_FOOTBALL_BASE_URL = "https://v3.football.api-sports.io"
-NO_FIXTURE_HISTORY = "No fixture history returned"
+NO_FIXTURE_HISTORY = "No fixture history returned by season/date range"
 SQUAD_ONLY_NOTE = "Squad only — detailed player stats unavailable"
 TEAM_ALIASES = {
     "USA": ["United States"],
@@ -173,19 +173,34 @@ def parse_squad_players(team_name: str, payload: Mapping[str, Any]) -> list[dict
 def parse_fixture_context(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
     response = payload.get("response") or []
     if not response:
-        return []
+        return unavailable_fixture_context_rows()
     fixture = response[0].get("fixture", {}) if isinstance(response[0], dict) else {}
     venue = fixture.get("venue") or {}
-    referee = fixture.get("referee") or "Unavailable"
+    referee = fixture.get("referee") or "Unavailable — referee not returned by fixture endpoint"
     return [
         {
             "Factor": "Venue",
-            "Value": venue.get("name") or "Unavailable",
+            "Value": venue.get("name") or "Unavailable — fixture context not returned",
             "Betting note": "Confirm venue manually before using travel/weather assumptions.",
         },
         {
             "Factor": "Referee",
             "Value": referee,
+            "Betting note": "Cards and fouls markets need referee confirmation.",
+        },
+    ]
+
+
+def unavailable_fixture_context_rows() -> list[dict[str, Any]]:
+    return [
+        {
+            "Factor": "Venue",
+            "Value": "Unavailable — fixture context not returned",
+            "Betting note": "Manual venue confirmation required.",
+        },
+        {
+            "Factor": "Referee",
+            "Value": "Unavailable — referee not returned by fixture endpoint",
             "Betting note": "Cards and fouls markets need referee confirmation.",
         },
     ]
@@ -243,6 +258,7 @@ def build_api_football_snapshot(
     player_rows = []
     context_rows = []
     team_lookup = {}
+    total_fixture_rows_used = 0
     for team_name in [home_team, away_team]:
         team_id = None
         matched_name = ""
@@ -277,6 +293,7 @@ def build_api_football_snapshot(
                 api_key=api_key,
                 team_id=team_id,
                 team_name=matched_name or team_name,
+                event_date=event_date,
                 diagnostics=diagnostics,
                 side=side,
             )
@@ -288,6 +305,7 @@ def build_api_football_snapshot(
             team_rows.append(unavailable_team_row(team_name, "Unavailable - fixture request failed"))
         else:
             diagnostics[f"Fixture history rows returned for {side.lower()} team"] = len(fixture_rows)
+            total_fixture_rows_used += len(fixture_rows)
             team_rows.append(
                 summarize_team_form(
                     matched_name or team_name,
@@ -322,16 +340,20 @@ def build_api_football_snapshot(
         context_rows.extend(parse_fixture_context(fixture_payload))
     except ApiFootballError as exc:
         diagnostics["Last safe API error message"] = str(exc)
-        context_rows.extend(
-            [
-                {"Factor": "Venue", "Value": "Unavailable", "Betting note": "Manual venue confirmation required."},
-                {"Factor": "Referee", "Value": "Unavailable", "Betting note": "Manual referee confirmation required."},
-            ]
+        context_rows.extend(unavailable_fixture_context_rows())
+
+    if not context_rows:
+        context_rows.extend(unavailable_fixture_context_rows())
+
+    if not player_rows:
+        diagnostics["Last safe API error message"] = (
+            diagnostics.get("Last safe API error message")
+            or "Squad endpoint returned no players"
         )
 
     return {
         "team_form": team_rows,
-        "players": player_rows or [_unavailable_player_row("Unavailable - squad not returned")],
+        "players": player_rows or [_unavailable_player_row("Squad endpoint returned no players")],
         "context": context_rows,
         "usage": usage_rows or [parse_api_football_headers({})],
         "missing": missing,
@@ -343,6 +365,9 @@ def build_api_football_snapshot(
             "Confirmed lineup loaded": "No",
             "Player prop confidence": "Reduced until lineup confirmed",
         },
+        "research_snapshot_source": "API-Football live research snapshot",
+        "fixture_rows_used": total_fixture_rows_used,
+        "squad_rows_used": len(player_rows),
         "last_updated": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -367,25 +392,30 @@ def fetch_fixture_history_with_fallbacks(
     api_key: str,
     team_id: int | str,
     team_name: str,
+    event_date: str,
     diagnostics: dict[str, Any],
     side: str,
 ) -> tuple[list[Mapping[str, Any]], list[dict[str, Any]]]:
     diagnostics["Fixture history request attempted"] = "Yes"
-    today = datetime.now(timezone.utc).date()
-    recent_from = (today - timedelta(days=900)).isoformat()
+    start_date, end_date, seasons = _fixture_date_window(event_date)
+    diagnostics[f"{side} fixture method used"] = "season/date-range"
+    diagnostics[f"{side} seasons tried"] = ", ".join(str(season) for season in seasons)
+    diagnostics[f"{side} date range used"] = f"{start_date} to {end_date}"
     params_list = [
         {
             "team": team_id,
-            "from": recent_from,
-            "to": today.isoformat(),
-        },
-        {"team": team_id, "last": 10},
-        {"search": team_name},
+            "season": season,
+            "from": start_date,
+            "to": end_date,
+        }
+        for season in seasons
     ]
     usage_rows = []
     safe_attempts = []
     last_payload: Mapping[str, Any] | None = None
     last_error = ""
+    combined_rows: list[Mapping[str, Any]] = []
+    rows_by_season = {}
     for params in params_list:
         safe_attempts.append({"path": "/fixtures", "params": params})
         try:
@@ -403,11 +433,28 @@ def fetch_fixture_history_with_fallbacks(
                 ensure_ascii=True,
             )
         response = last_payload.get("response") or []
-        if response:
-            diagnostics[f"{side} fixture endpoint used"] = "/fixtures"
-            diagnostics[f"{side} fixture endpoint params used"] = _safe_params(params)
-            diagnostics[f"{side} fixture response body summary"] = _payload_summary(last_payload)
-            return response[:10], usage_rows
+        rows_by_season[str(params["season"])] = len(response)
+        combined_rows.extend(response)
+
+    diagnostics[f"{side} fixture endpoint used"] = "/fixtures"
+    diagnostics[f"{side} fixture endpoint params used"] = json.dumps(
+        [_safe_params(params) for params in params_list],
+        ensure_ascii=True,
+    )
+    diagnostics[f"{side} rows returned by season"] = json.dumps(
+        rows_by_season,
+        ensure_ascii=True,
+    )
+    final_rows = _latest_completed_fixtures(combined_rows)
+    diagnostics[f"{side} completed fixtures used"] = len(
+        [row for row in final_rows if _is_completed_fixture(row)]
+    )
+    diagnostics[f"{side} final fixtures used for Last 10"] = len(final_rows[:10])
+    if final_rows:
+        diagnostics[f"{side} fixture response body summary"] = (
+            f"Combined {len(combined_rows)} rows; using {len(final_rows[:10])} latest fixtures."
+        )
+        return final_rows[:10], usage_rows
 
     diagnostics[f"{side} fixture endpoint attempts"] = json.dumps(
         [{"path": item["path"], "params": _safe_params(item["params"])} for item in safe_attempts]
@@ -416,6 +463,39 @@ def fetch_fixture_history_with_fallbacks(
         _payload_summary(last_payload or {}) if last_payload is not None else last_error
     )
     return [], usage_rows
+
+
+def _fixture_date_window(event_date: str) -> tuple[str, str, list[int]]:
+    try:
+        end = datetime.fromisoformat(event_date.split("T", 1)[0]).date()
+    except (TypeError, ValueError, AttributeError):
+        end = datetime.now(timezone.utc).date()
+    start = end - timedelta(days=548)
+    seasons = [end.year, end.year - 1]
+    return start.isoformat(), end.isoformat(), seasons
+
+
+def _latest_completed_fixtures(rows: list[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    deduped = {}
+    for row in rows:
+        fixture = row.get("fixture", {}) if isinstance(row, Mapping) else {}
+        fixture_id = fixture.get("id")
+        key = fixture_id if fixture_id is not None else json.dumps(row, sort_keys=True, default=str)
+        deduped[key] = row
+    all_rows = list(deduped.values())
+    completed = [row for row in all_rows if _is_completed_fixture(row)]
+    usable = completed if completed else all_rows
+    return sorted(
+        usable,
+        key=lambda row: str(row.get("fixture", {}).get("date", "")),
+        reverse=True,
+    )
+
+
+def _is_completed_fixture(row: Mapping[str, Any]) -> bool:
+    status = row.get("fixture", {}).get("status", {})
+    short = str(status.get("short", "")).upper()
+    return short in {"FT", "AET", "PEN"}
 
 
 def _safe_params(params: Mapping[str, Any]) -> dict[str, Any]:

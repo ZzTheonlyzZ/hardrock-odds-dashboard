@@ -303,6 +303,8 @@ def build_ai_research_package(
     contextual_factors: list[dict[str, Any]] | None = None,
     betting_signals: list[dict[str, Any]] | None = None,
     integration_diagnostics: dict[str, Any] | None = None,
+    compatibility_summary: list[dict[str, Any]] | None = None,
+    api_capability_audit: dict[str, Any] | None = None,
     team_mappings: dict[str, Any] | None = None,
     missing_data: list[Any] | None = None,
 ) -> dict[str, Any]:
@@ -402,6 +404,8 @@ def build_ai_research_package(
         "contextual_factors": contextual_factors or [],
         "betting_signals": betting_signals or [],
         "integration_diagnostics": integration_diagnostics or {},
+        "compatibility_summary": compatibility_summary or [],
+        "api_capability_audit": api_capability_audit or {},
         "team_mappings": team_mappings or {},
         "missing_data": missing_data or [],
         "hard_rock_fl_markets": hardrock_fl,
@@ -436,6 +440,7 @@ def build_ai_research_package(
                 {"Diagnostic": key, "Value": value}
                 for key, value in (integration_diagnostics or {}).items()
             ],
+            "API compatibility summary": compatibility_summary or [],
             "Missing live research data": [
                 {"Status": value}
                 for value in (missing_data or [])
@@ -682,6 +687,35 @@ def ai_package_to_markdown(package: dict[str, Any]) -> str:
         else "None."
     )
 
+    lines.extend(["", "## API Compatibility Summary"])
+    compatibility = package.get("compatibility_summary") or []
+    lines.append(
+        _markdown_table(compatibility)
+        if compatibility
+        else "No API compatibility summary captured."
+    )
+
+    audit = package.get("api_capability_audit") or {}
+    if audit:
+        lines.extend(["", "## API Capability Audit"])
+        lines.append("### APIs Configured")
+        lines.append(_markdown_table(audit.get("apis_configured", [])))
+        lines.append("### Master Data Compatibility Matrix")
+        lines.append(_markdown_table(audit.get("compatibility_matrix", [])))
+        lines.append("### Bet-Type Support Matrix")
+        lines.append(_markdown_table(audit.get("bet_type_support_matrix", [])))
+        lines.append("### API Limitations / Missing Data")
+        lines.append(
+            _markdown_table(
+                [{"Missing data": item} for item in audit.get("missing_data", [])]
+            )
+            if audit.get("missing_data")
+            else "None."
+        )
+        lines.append("### Manual Fallback List")
+        for item in audit.get("manual_research_checklist", []):
+            lines.append(f"- {item}")
+
     lines.extend(["", "## Betting Signals"])
     lines.append(_markdown_table(package["betting_signals"]) if package["betting_signals"] else "No betting signals generated.")
 
@@ -795,6 +829,31 @@ def chatgpt_analysis_package_to_markdown(package: dict[str, Any]) -> str:
     ]
     for key, rows in package["data_gaps"].items():
         lines.extend([f"### {key}", _markdown_table(rows) if rows else "None."])
+    audit = package.get("api_capability_audit") or {}
+    if audit:
+        lines.extend(["", "## API Capability Audit Summary"])
+        if audit.get("apis_configured"):
+            lines.extend(["### APIs Configured", _markdown_table(audit["apis_configured"])])
+        if audit.get("compatibility_matrix"):
+            lines.extend(
+                [
+                    "### Master Data Compatibility Matrix",
+                    _markdown_table(audit["compatibility_matrix"]),
+                ]
+            )
+        if audit.get("bet_type_support_matrix"):
+            lines.extend(
+                [
+                    "### Bet-Type Support Matrix",
+                    _markdown_table(audit["bet_type_support_matrix"]),
+                ]
+            )
+        if audit.get("missing_data"):
+            lines.extend(["### API Limitations"])
+            lines.extend(f"- {item}" for item in audit["missing_data"])
+        if audit.get("manual_research_checklist"):
+            lines.extend(["### Manual Fallback List"])
+            lines.extend(f"- {item}" for item in audit["manual_research_checklist"])
     return "\n".join(lines)
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Mapping
@@ -270,7 +271,9 @@ def unavailable_research_snapshot(reason: str = "Unavailable - API key missing")
             "Weather coordinates available": "No",
             "Last safe API error message": reason,
         },
+        "compatibility_summary": [],
         "team_mappings": {},
+        "research_snapshot_source": "Unavailable fallback snapshot",
         "player_summary": {
             "Squad players loaded": 0,
             "Detailed player stats loaded": 0,
@@ -279,6 +282,107 @@ def unavailable_research_snapshot(reason: str = "Unavailable - API key missing")
         },
         "last_updated": datetime.now(timezone.utc).isoformat(),
     }
+
+
+def normalize_research_snapshot_for_event(
+    snapshot: dict[str, Any],
+    *,
+    home_team: str,
+    away_team: str,
+    api_football_key_found: bool,
+) -> dict[str, Any]:
+    normalized = copy.deepcopy(snapshot)
+    diagnostics = normalized.setdefault("integration_diagnostics", {})
+    diagnostics["API-Football key found"] = "Yes" if api_football_key_found else "No"
+    diagnostics["Selected home team used by Research Data"] = home_team
+    diagnostics["Selected away team used by Research Data"] = away_team
+    if api_football_key_found and "API key missing" in str(
+        diagnostics.get("Last safe API error message", "")
+    ):
+        diagnostics["Last safe API error message"] = "Current API request did not return rows"
+
+    team_rows = normalized.get("team_form", [])
+    selected_teams = [home_team, away_team]
+    for index, row in enumerate(team_rows[:2]):
+        row["Team"] = selected_teams[index]
+        if api_football_key_found and _row_mentions_key_missing(row):
+            reason = "Not returned by current API request"
+            row["Status"] = reason
+            row["Last 5"] = reason
+            row["Last 10"] = reason
+    if not team_rows:
+        normalized["team_form"] = [
+            _event_team_row(home_team, api_football_key_found),
+            _event_team_row(away_team, api_football_key_found),
+        ]
+
+    if api_football_key_found:
+        players = normalized.get("players", [])
+        if not players or any(row.get("Name") == "Manual input available" for row in players):
+            normalized["players"] = [
+                {
+                    "Name": "Squad endpoint returned no players",
+                    "Team": "",
+                    "Position": "",
+                    "Expected starter": "Squad endpoint returned no players",
+                    "Minutes per match": "",
+                    "Goals per 90": "",
+                    "Assists per 90": "",
+                    "Shots per 90": "",
+                    "Injury status": "Squad endpoint returned no players",
+                    "Rotation risk": "Manual review required",
+                    "Notes": "Current API request did not return squad rows.",
+                }
+            ]
+        for row in normalized.get("context", []):
+            factor = row.get("Factor")
+            if "API key missing" not in str(row.get("Value", "")):
+                continue
+            if factor == "Weather":
+                row["Value"] = "Unavailable — venue coordinates missing"
+            elif factor == "Schedule/fatigue":
+                row["Value"] = "Needs fixture history and schedule review"
+            elif factor == "Referee":
+                row["Value"] = "Unavailable — referee not returned by fixture endpoint"
+            elif factor == "Venue":
+                row["Value"] = "Unavailable — fixture context not returned"
+            else:
+                row["Value"] = "Needs manual input"
+        normalized["missing_data"] = [
+            item
+            for item in normalized.get("missing_data", [])
+            if "API key missing" not in str(item)
+        ] or ["Current API request did not return rows"]
+    return normalized
+
+
+def _event_team_row(team: str, api_football_key_found: bool) -> dict[str, Any]:
+    reason = (
+        "Not returned by current API request"
+        if api_football_key_found
+        else "Unavailable - API key missing"
+    )
+    return {
+        "Team": team,
+        "Status": reason,
+        "Last 5": reason,
+        "Last 10": reason,
+        "Wins": "",
+        "Draws": "",
+        "Losses": "",
+        "Goals scored": "",
+        "Goals conceded": "",
+        "Goal differential": "",
+        "BTTS rate": "",
+        "Over 2.5 rate": "",
+        "Clean sheets": "",
+        "Failed to score": "",
+        "Home/away split": "",
+    }
+
+
+def _row_mentions_key_missing(row: Mapping[str, Any]) -> bool:
+    return any("API key missing" in str(value) for value in row.values())
 
 
 def build_betting_signals(

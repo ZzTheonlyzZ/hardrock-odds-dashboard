@@ -38,6 +38,11 @@ from src.odds_api import (
 )
 from src.parlay import calculate_parlay, decimal_to_american
 from src.probabilities import american_to_implied_probability
+from src.api_capability_audit import (
+    api_capability_audit_to_json,
+    api_capability_audit_to_markdown,
+    build_api_capability_audit,
+)
 from src.research_board import (
     ai_package_to_csv,
     ai_package_to_json,
@@ -58,6 +63,7 @@ from src.research_lab import (
     build_betting_signals,
     coverage_counts,
     default_api_usage_rows,
+    normalize_research_snapshot_for_event,
     source_status_summary,
     request_budget_preview,
     unavailable_research_snapshot,
@@ -185,6 +191,13 @@ def get_configured_api_key() -> str:
             "The Odds API key is missing. Add THE_ODDS_API_KEY to "
             ".streamlit/secrets.toml and restart Streamlit."
         ) from exc
+
+
+def secret_is_configured(name: str) -> bool:
+    try:
+        return bool(str(st.secrets.get(name, "")).strip())
+    except (AttributeError, FileNotFoundError, RuntimeError):
+        return False
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -460,7 +473,13 @@ def render_research_board_page() -> None:
     if scanner_data and scanner_data["event_id"] == selected_event["id"]:
         found_lines = list(scanner_data["found_lines"])
         missing_fl = markets_missing_from_hardrock_fl(found_lines)
-        context_data = st.session_state.research_context_data
+        api_football_key_found = secret_is_configured("API_FOOTBALL_KEY")
+        context_data = normalize_research_snapshot_for_event(
+            st.session_state.research_context_data,
+            home_team=selected_event.get("home_team", ""),
+            away_team=selected_event.get("away_team", ""),
+            api_football_key_found=api_football_key_found,
+        )
         api_usage_rows = context_data.get("api_usage") or default_api_usage_rows()
         compact_source_status = (
             "Source status: "
@@ -468,6 +487,18 @@ def render_research_board_page() -> None:
             f"Generic Hard Rock: {'Yes' if any(row['Generic Hard Rock Available'] == 'Yes' for row in found_lines) else 'No'} | "
             f"Consensus: {'Yes' if any(row['Consensus Available'] == 'Yes' for row in found_lines) else 'No'} | "
             "Manual confirmation required."
+        )
+        audit_snapshot = build_api_capability_audit(
+            selected_event=selected_event,
+            scanner_data=scanner_data,
+            context_data=context_data,
+            odds_key_found=bool(api_key),
+            api_football_key_found=api_football_key_found,
+            football_data_key_found=secret_is_configured("FOOTBALL_DATA_KEY"),
+            manual_coordinates_available=(
+                context_data.get("integration_diagnostics", {}).get("Weather coordinates available")
+                == "Yes"
+            ),
         )
         betting_signals = build_betting_signals(
             found_lines,
@@ -685,6 +716,10 @@ def render_research_board_page() -> None:
         with lab_tabs[1]:
             st.caption(compact_source_status)
             diagnostics = context_data.get("integration_diagnostics", {})
+            diagnostics["API key found in Research Data renderer"] = diagnostics.get(
+                "API-Football key found",
+                "No",
+            )
             player_summary = context_data.get("player_summary", {})
             squad_loaded = int(player_summary.get("Squad players loaded") or 0) > 0
             if diagnostics.get("API-Football key found") == "No":
@@ -704,6 +739,9 @@ def render_research_board_page() -> None:
             research_subtabs = st.tabs(["Team Form", "Player Research", "Context"])
             with research_subtabs[0]:
                 st.subheader("Team Research Panel")
+                st.caption(
+                    f"Snapshot source: {diagnostics.get('Research snapshot source used by Research Data', context_data.get('research_snapshot_source', 'Unknown'))}"
+                )
                 st.dataframe(pd.DataFrame(context_data["team_form"]), use_container_width=True, hide_index=True)
             with research_subtabs[1]:
                 st.subheader("Player Research Panel")
@@ -857,11 +895,20 @@ def render_research_board_page() -> None:
                 "generic Hard Rock warnings, manual confirmation requirements, and odds-only signal status."
             )
 
-            export_col1, export_col2 = st.columns(2)
+            export_col1, export_col2, export_col3 = st.columns(3)
             with export_col1:
                 generate_ai_package = st.button("Generate AI Research Package")
             with export_col2:
                 generate_chatgpt_package = st.button("Generate ChatGPT Analysis Package")
+            with export_col3:
+                generate_audit_package = st.button("Generate API Capability Audit Package")
+
+            if generate_audit_package:
+                st.session_state.api_capability_audit = audit_snapshot
+                st.session_state.api_capability_audit_event_id = scanner_data["event_id"]
+                st.session_state.api_capability_audit_markdown = (
+                    api_capability_audit_to_markdown(audit_snapshot)
+                )
 
             if generate_ai_package or generate_chatgpt_package:
                 date_value = scanner_data["commence_time"]
@@ -907,16 +954,26 @@ def render_research_board_page() -> None:
                     contextual_factors=context_data["context"],
                     betting_signals=betting_signals,
                     integration_diagnostics=context_data.get("integration_diagnostics", {}),
+                    compatibility_summary=audit_snapshot.get("compatibility_matrix", []),
+                    api_capability_audit=audit_snapshot,
                     team_mappings=context_data.get("team_mappings", {}),
-                    missing_data=context_data.get("missing_data", []),
+                    missing_data=(
+                        context_data.get("missing_data", [])
+                        + audit_snapshot.get("missing_data", [])
+                    ),
                 )
                 st.session_state.ai_package = package
+                st.session_state.ai_package_event_id = scanner_data["event_id"]
                 st.session_state.ai_package_markdown = ai_package_to_markdown(package)
                 st.session_state.chatgpt_package_markdown = (
                     chatgpt_analysis_package_to_markdown(package)
                 )
 
-            package = st.session_state.get("ai_package")
+            package = (
+                st.session_state.get("ai_package")
+                if st.session_state.get("ai_package_event_id") == scanner_data["event_id"]
+                else None
+            )
             if package:
                 markdown_package = st.session_state.ai_package_markdown
                 chatgpt_package = st.session_state.get(
@@ -943,6 +1000,27 @@ def render_research_board_page() -> None:
                 st.download_button("Download JSON", data=ai_package_to_json(package), file_name="ai_research_package.json", mime="application/json")
                 st.text_area("ChatGPT Analysis Package", value=chatgpt_package, height=300)
                 st.download_button("Download ChatGPT Analysis Package", data=chatgpt_package, file_name="chatgpt_analysis_package.md", mime="text/markdown")
+            audit_package = (
+                st.session_state.get("api_capability_audit")
+                if st.session_state.get("api_capability_audit_event_id") == scanner_data["event_id"]
+                else None
+            )
+            if audit_package:
+                audit_markdown = st.session_state.api_capability_audit_markdown
+                with st.expander("Preview API Capability Audit Package"):
+                    st.text_area("Copy API Capability Audit Package", value=audit_markdown, height=360)
+                st.download_button(
+                    "Download API Capability Audit Markdown",
+                    data=audit_markdown,
+                    file_name="api_capability_audit.md",
+                    mime="text/markdown",
+                )
+                st.download_button(
+                    "Download API Capability Audit JSON",
+                    data=api_capability_audit_to_json(audit_package),
+                    file_name="api_capability_audit.json",
+                    mime="application/json",
+                )
 
         with lab_tabs[5]:
             st.caption(compact_source_status)
@@ -1024,6 +1102,7 @@ def render_research_board_page() -> None:
                     )
                 context_data = st.session_state.research_context_data
                 st.success("Research context prepared without unsafe sportsbook automation.")
+                st.rerun()
             with st.expander("Live integration diagnostics"):
                 diagnostics = context_data.get("integration_diagnostics", {})
                 if diagnostics:
@@ -1039,6 +1118,47 @@ def render_research_board_page() -> None:
                     )
                 else:
                     st.info("No live integration diagnostics captured yet.")
+            with st.expander("API Data Compatibility Inspector"):
+                compatibility = context_data.get("compatibility_summary", [])
+                if compatibility:
+                    st.dataframe(
+                        pd.DataFrame(compatibility),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+                else:
+                    st.info("No API compatibility summary captured yet.")
+            with st.expander("API Capability Audit", expanded=True):
+                st.markdown("**APIs configured**")
+                st.dataframe(
+                    pd.DataFrame(audit_snapshot["apis_configured"]),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+                st.markdown("**Endpoints tested**")
+                st.dataframe(
+                    pd.DataFrame(audit_snapshot["endpoints_tested"]),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+                st.markdown("**Master Data Compatibility Matrix**")
+                st.dataframe(
+                    pd.DataFrame(audit_snapshot["compatibility_matrix"]),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+                st.markdown("**Bet-Type Support Matrix**")
+                st.dataframe(
+                    pd.DataFrame(audit_snapshot["bet_type_support_matrix"]),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+                st.markdown("**Final audit summary**")
+                st.dataframe(
+                    pd.DataFrame(audit_snapshot["summary"]),
+                    use_container_width=True,
+                    hide_index=True,
+                )
             with st.expander("Scanner API errors / diagnostics"):
                 if scanner_data["errors"]:
                     st.warning(

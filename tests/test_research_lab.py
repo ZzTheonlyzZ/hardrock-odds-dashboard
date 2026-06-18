@@ -15,6 +15,7 @@ from src.research_lab import (
     OpenMeteoQuotaTracker,
     aggregate_api_usage_rows,
     build_betting_signals,
+    normalize_research_snapshot_for_event,
     parse_api_football_headers,
     parse_football_data_headers,
     parse_the_odds_api_headers,
@@ -22,6 +23,44 @@ from src.research_lab import (
     request_budget_preview,
     unavailable_research_snapshot,
 )
+
+
+def _fd_match(
+    match_id,
+    utc_date,
+    home_id,
+    home_name,
+    home_goals,
+    away_id,
+    away_name,
+    away_goals,
+):
+    return {
+        "id": match_id,
+        "utcDate": utc_date,
+        "status": "FINISHED",
+        "homeTeam": {"id": home_id, "name": home_name},
+        "awayTeam": {"id": away_id, "name": away_name},
+        "score": {"fullTime": {"home": home_goals, "away": away_goals}},
+    }
+
+
+def _fd_team_matches(team_id, team_name, count):
+    rows = []
+    for index in range(count):
+        rows.append(
+            _fd_match(
+                1000 + team_id * 100 + index,
+                f"2026-05-{28 - index:02d}T00:00:00Z",
+                team_id,
+                team_name,
+                1 + (index % 3),
+                900 + index,
+                f"Opponent {index}",
+                index % 2,
+            )
+        )
+    return rows
 
 
 class ResearchLabTests(unittest.TestCase):
@@ -71,6 +110,137 @@ class ResearchLabTests(unittest.TestCase):
         self.assertEqual(row["Minute remaining"], 2)
         self.assertEqual(row["Reset time"], "30")
         self.assertEqual(row["Status"], "Warning")
+
+    def test_football_data_maps_teams_and_marks_two_rows_limited(self):
+        def fake_fetch(path, params, api_key):
+            if path == "/competitions/WC/teams":
+                return {
+                    "teams": [
+                        {"id": 1, "name": "Canada", "tla": "CAN"},
+                        {"id": 2, "name": "Qatar", "tla": "QAT"},
+                    ]
+                }, {"API name": "football-data.org"}
+            if path == "/teams/1/matches":
+                return {
+                    "matches": [
+                        _fd_match(11, "2026-06-01T00:00:00Z", 1, "Canada", 3, 2, "Opponent", 1),
+                        _fd_match(12, "2026-05-20T00:00:00Z", 3, "Opponent", 0, 1, "Canada", 0),
+                    ]
+                }, {"API name": "football-data.org"}
+            if path == "/teams/2/matches":
+                return {
+                    "matches": [
+                        _fd_match(21, "2026-06-02T00:00:00Z", 2, "Qatar", 1, 4, "Opponent", 1),
+                        _fd_match(22, "2026-05-22T00:00:00Z", 4, "Opponent", 0, 2, "Qatar", 0),
+                    ]
+                }, {"API name": "football-data.org"}
+            if path == "/competitions/WC/matches":
+                return {"matches": []}, {"API name": "football-data.org"}
+            return {}, {"API name": "football-data.org"}
+
+        original = football_data.fetch_football_data_json
+        football_data.fetch_football_data_json = fake_fetch
+        try:
+            snapshot = football_data.build_football_data_snapshot(
+                api_key="safe-football-data-key",
+                home_team="Canada",
+                away_team="Qatar",
+                event_date="2026-06-18",
+            )
+        finally:
+            football_data.fetch_football_data_json = original
+
+        self.assertEqual(
+            snapshot["team_form"][0]["Status"],
+            football_data.LIMITED_FOOTBALL_DATA_STATUS,
+        )
+        self.assertEqual(
+            snapshot["team_form"][0]["Last 5"],
+            football_data.LIMITED_FOOTBALL_DATA_STATUS,
+        )
+        self.assertEqual(snapshot["team_form"][0]["Last 5 threshold met"], "No")
+        self.assertEqual(snapshot["team_form"][0]["Last 10 threshold met"], "No")
+        self.assertEqual(snapshot["team_form"][0]["Wins"], 1)
+        self.assertEqual(snapshot["team_form"][0]["Goals scored"], 3)
+        self.assertEqual(
+            snapshot["diagnostics"]["Home football-data.org mapped team id"],
+            1,
+        )
+        self.assertEqual(
+            snapshot["diagnostics"]["Home football-data.org mapping method"],
+            "exact team name",
+        )
+        self.assertGreater(snapshot["match_rows_used"], 0)
+        self.assertEqual(
+            snapshot["diagnostics"]["football-data.org team-form sample quality"],
+            "Limited sample only",
+        )
+
+    def test_football_data_thresholds_last5_and_last10(self):
+        partial = football_data.summarize_football_data_team_form(
+            "Canada",
+            _fd_team_matches(1, "Canada", 5),
+            team_id=1,
+            event_date="2026-06-18",
+        )
+        self.assertEqual(partial["Status"], football_data.PARTIAL_FOOTBALL_DATA_STATUS)
+        self.assertEqual(partial["Last 5 threshold met"], "Yes")
+        self.assertEqual(partial["Last 10 threshold met"], "No")
+        self.assertEqual(partial["Team-form sample quality"], "Last 5 threshold met only — limited support")
+
+        full = football_data.summarize_football_data_team_form(
+            "Canada",
+            _fd_team_matches(1, "Canada", 10),
+            team_id=1,
+            event_date="2026-06-18",
+        )
+        self.assertEqual(full["Status"], football_data.LIVE_FOOTBALL_DATA_STATUS)
+        self.assertEqual(full["Last 5 threshold met"], "Yes")
+        self.assertEqual(full["Last 10 threshold met"], "Yes")
+        self.assertEqual(full["Model support"], "Can support model")
+
+    def test_live_snapshot_uses_football_data_when_api_football_missing(self):
+        def fake_fetch(path, params, api_key):
+            if path == "/competitions/WC/teams":
+                return {
+                    "teams": [
+                        {"id": 1, "name": "Canada", "tla": "CAN"},
+                        {"id": 2, "name": "Qatar", "tla": "QAT"},
+                    ]
+                }, {"API name": "football-data.org"}
+            if path == "/teams/1/matches":
+                return {"matches": _fd_team_matches(1, "Canada", 10)}, {"API name": "football-data.org"}
+            if path == "/teams/2/matches":
+                return {"matches": _fd_team_matches(2, "Qatar", 10)}, {"API name": "football-data.org"}
+            if path == "/competitions/WC/matches":
+                return {"matches": []}, {"API name": "football-data.org"}
+            return {}, {"API name": "football-data.org"}
+
+        original = football_data.fetch_football_data_json
+        football_data.fetch_football_data_json = fake_fetch
+        try:
+            snapshot = research_integrations.build_live_soccer_research_snapshot(
+                secrets={"FOOTBALL_DATA_KEY": "safe-football-data-key"},
+                home_team="Canada",
+                away_team="Qatar",
+                commence_time="2026-06-18T20:00:00Z",
+            )
+        finally:
+            football_data.fetch_football_data_json = original
+
+        self.assertEqual(
+            snapshot["team_form"][0]["Status"],
+            football_data.LIVE_FOOTBALL_DATA_STATUS,
+        )
+        self.assertEqual(snapshot["data_quality"], "Odds + team form")
+        self.assertEqual(
+            snapshot["integration_diagnostics"]["football-data.org rows used by Research Data"],
+            20,
+        )
+        self.assertEqual(
+            snapshot["integration_diagnostics"]["Research snapshot source used by Research Data"],
+            "football-data.org live team-match fallback snapshot",
+        )
 
     def test_open_meteo_local_quota_tracking(self):
         tracker = OpenMeteoQuotaTracker(day_calls=9600)
@@ -180,7 +350,7 @@ class ResearchLabTests(unittest.TestCase):
 
     def test_api_client_no_fixtures_does_not_show_zero_stats(self):
         row = summarize_team_form("Inter Miami", [])
-        self.assertEqual(row["Last 5"], "No fixture history returned")
+        self.assertEqual(row["Last 5"], "No fixture history returned by season/date range")
         self.assertEqual(row["Wins"], "")
         self.assertEqual(row["Goals scored"], "")
 
@@ -264,7 +434,7 @@ class ResearchLabTests(unittest.TestCase):
         self.assertEqual(api_football_row["Requests remaining"], 88)
         self.assertEqual(api_football_row["Status"], "Watch")
 
-    def test_fixture_fallback_prefers_date_range_before_last(self):
+    def test_fixture_fallback_tries_event_year_and_previous_year(self):
         diagnostics = {}
         calls = []
 
@@ -279,6 +449,7 @@ class ResearchLabTests(unittest.TestCase):
                 api_key="safe-test-key",
                 team_id=10,
                 team_name="England",
+                event_date="2026-06-18",
                 diagnostics=diagnostics,
                 side="Home",
             )
@@ -286,9 +457,153 @@ class ResearchLabTests(unittest.TestCase):
             api_football.fetch_api_football_json = original
 
         self.assertEqual(rows, [])
+        self.assertEqual(calls[0]["season"], 2026)
+        self.assertEqual(calls[1]["season"], 2025)
         self.assertIn("from", calls[0])
+        self.assertIn("to", calls[0])
         self.assertNotIn("last", calls[0])
-        self.assertEqual(calls[1], {"team": 10, "last": 10})
+
+    def test_fixture_fallback_deduplicates_and_keeps_completed_latest(self):
+        diagnostics = {}
+
+        def fixture(fixture_id, date, home_goals, away_goals):
+            return {
+                "fixture": {
+                    "id": fixture_id,
+                    "date": date,
+                    "status": {"short": "FT"},
+                },
+                "teams": {
+                    "home": {"id": 10, "name": "England"},
+                    "away": {"id": 20, "name": "Opponent"},
+                },
+                "goals": {"home": home_goals, "away": away_goals},
+            }
+
+        def fake_fetch(path, params, api_key):
+            if params["season"] == 2026:
+                return {
+                    "response": [
+                        fixture(1, "2026-06-01T00:00:00Z", 2, 0),
+                        fixture(2, "2026-03-01T00:00:00Z", 1, 1),
+                    ]
+                }, {"API name": "API-Football"}
+            return {
+                "response": [
+                    fixture(2, "2026-03-01T00:00:00Z", 1, 1),
+                    fixture(3, "2025-11-01T00:00:00Z", 0, 1),
+                ]
+            }, {"API name": "API-Football"}
+
+        original = api_football.fetch_api_football_json
+        api_football.fetch_api_football_json = fake_fetch
+        try:
+            rows, _usage = fetch_fixture_history_with_fallbacks(
+                api_key="safe-test-key",
+                team_id=10,
+                team_name="England",
+                event_date="2026-06-18",
+                diagnostics=diagnostics,
+                side="Home",
+            )
+        finally:
+            api_football.fetch_api_football_json = original
+
+        self.assertEqual([row["fixture"]["id"] for row in rows], [1, 2, 3])
+        form = summarize_team_form("England", rows, team_id=10)
+        self.assertEqual(form["Wins"], 1)
+        self.assertEqual(form["Draws"], 1)
+        self.assertEqual(form["Losses"], 1)
+        self.assertEqual(form["Goals scored"], 3)
+        self.assertEqual(form["Goals conceded"], 2)
+        self.assertEqual(form["BTTS rate"], "33.3%")
+        self.assertEqual(form["Over 2.5 rate"], "0.0%")
+        self.assertEqual(form["Clean sheets"], 1)
+        self.assertEqual(form["Failed to score"], 1)
+
+    def test_compatibility_summary_marks_fixture_and_squad_cells(self):
+        summary = research_integrations.build_api_compatibility_summary(
+            team_form=[
+                {
+                    "Team": "England",
+                    "Status": "No fixture history returned by season/date range",
+                }
+            ],
+            player_summary={"Squad players loaded": 11},
+            weather={"missing": ["Venue latitude/longitude"]},
+        )
+        by_cell = {row["Dashboard cell"]: row for row in summary}
+        self.assertEqual(
+            by_cell["Last 5"]["Status"],
+            "Not returned by current API request",
+        )
+        self.assertEqual(by_cell["Player names"]["Status"], "Fillable now")
+        self.assertEqual(by_cell["Position"]["Status"], "Fillable now")
+        self.assertEqual(
+            by_cell["Goals per 90"]["Status"],
+            "Fillable with another endpoint",
+        )
+        self.assertEqual(by_cell["Weather"]["Status"], "Needs manual input")
+
+        ready_summary = research_integrations.build_api_compatibility_summary(
+            team_form=[{"Team": "England", "Status": "Live API-Football"}],
+            player_summary={"Squad players loaded": 0},
+            weather={"missing": []},
+        )
+        ready_by_cell = {row["Dashboard cell"]: row for row in ready_summary}
+        self.assertEqual(ready_by_cell["Last 5"]["Status"], "Fillable now")
+        self.assertEqual(ready_by_cell["Weather"]["Status"], "Fillable now")
+
+    def test_live_snapshot_zero_squad_uses_api_fallback_message(self):
+        def fake_fetch(path, params, api_key):
+            if path == "/teams":
+                name = params["search"]
+                return {
+                    "response": [
+                        {"team": {"id": 1 if name == "Qatar" else 2, "name": name}}
+                    ]
+                }, {"API name": "API-Football"}
+            if path == "/players/squads":
+                return {"response": [{"players": []}]}, {"API name": "API-Football"}
+            if path == "/fixtures":
+                return {"response": []}, {"API name": "API-Football"}
+            return {"response": []}, {"API name": "API-Football"}
+
+        original = api_football.fetch_api_football_json
+        api_football.fetch_api_football_json = fake_fetch
+        try:
+            snapshot = build_api_football_snapshot(
+                api_key="safe-test-key",
+                home_team="Qatar",
+                away_team="Canada",
+                event_date="2026-06-18",
+            )
+        finally:
+            api_football.fetch_api_football_json = original
+
+        self.assertEqual(snapshot["team_form"][0]["Team"], "Qatar")
+        self.assertNotIn("API key missing", snapshot["team_form"][0]["Status"])
+        self.assertEqual(snapshot["players"][0]["Name"], "Squad endpoint returned no players")
+        self.assertNotEqual(snapshot["players"][0]["Name"], "Manual input available")
+        self.assertNotIn("API key missing", snapshot["context"][0]["Value"])
+        self.assertEqual(snapshot["fixture_rows_used"], 0)
+        self.assertEqual(snapshot["squad_rows_used"], 0)
+
+    def test_normalized_snapshot_uses_selected_teams_when_key_exists(self):
+        snapshot = normalize_research_snapshot_for_event(
+            unavailable_research_snapshot(),
+            home_team="Canada",
+            away_team="Qatar",
+            api_football_key_found=True,
+        )
+        self.assertEqual(snapshot["team_form"][0]["Team"], "Canada")
+        self.assertEqual(snapshot["team_form"][1]["Team"], "Qatar")
+        self.assertNotIn("API key missing", snapshot["team_form"][0]["Status"])
+        self.assertEqual(
+            snapshot["integration_diagnostics"]["API-Football key found"],
+            "Yes",
+        )
+        self.assertEqual(snapshot["players"][0]["Name"], "Squad endpoint returned no players")
 
     def test_no_sportsbook_scraping_or_login_helpers_exist(self):
         forbidden_names = [
