@@ -66,6 +66,7 @@ class ResearchBetCard:
     fractional_kelly: float
     kelly_stake: float
     stake: float
+    notes: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -242,6 +243,15 @@ def build_hardrock_coverage_scan(
                         if source_row
                         else None
                     ),
+                    "source_type": source_used,
+                    "source_name": source_label,
+                    "confidence": confidence,
+                    "last_updated": "",
+                    "is_manual": False,
+                    "is_hardrock_fl": bool(fl_row),
+                    "is_generic_hardrock": bool(generic_row),
+                    "is_consensus": bool(consensus),
+                    "needs_manual_confirmation": True,
                 }
             )
 
@@ -287,6 +297,16 @@ def build_ai_research_package(
     manual_entries: list[dict[str, Any]],
     bankroll: float,
     kelly_multiplier: float,
+    api_usage: list[dict[str, Any]] | None = None,
+    team_research: list[dict[str, Any]] | None = None,
+    player_research: list[dict[str, Any]] | None = None,
+    contextual_factors: list[dict[str, Any]] | None = None,
+    betting_signals: list[dict[str, Any]] | None = None,
+    integration_diagnostics: dict[str, Any] | None = None,
+    compatibility_summary: list[dict[str, Any]] | None = None,
+    api_capability_audit: dict[str, Any] | None = None,
+    team_mappings: dict[str, Any] | None = None,
+    missing_data: list[Any] | None = None,
 ) -> dict[str, Any]:
     hardrock_fl = [
         row for row in found_lines if row["Hard Rock FL Available"] == "Yes"
@@ -378,6 +398,16 @@ def build_ai_research_package(
         },
         "game_information": game_info,
         "source_coverage": source_coverage,
+        "api_usage": api_usage or [],
+        "team_research": team_research or [],
+        "player_research": player_research or [],
+        "contextual_factors": contextual_factors or [],
+        "betting_signals": betting_signals or [],
+        "integration_diagnostics": integration_diagnostics or {},
+        "compatibility_summary": compatibility_summary or [],
+        "api_capability_audit": api_capability_audit or {},
+        "team_mappings": team_mappings or {},
+        "missing_data": missing_data or [],
         "hard_rock_fl_markets": hardrock_fl,
         "generic_hard_rock_markets": generic,
         "market_consensus": consensus,
@@ -399,6 +429,22 @@ def build_ai_research_package(
                 if row["Generic Hard Rock Available"] == "No"
             ],
             "Markets requiring manual verification": missing_fl + missing_markets,
+            "Missing players": [] if player_research else [{"Status": "Unavailable - API key missing"}],
+            "Missing lineups": [{"Status": "Player prop requires confirmed lineup."}],
+            "Missing injuries": [] if player_research else [{"Status": "Unavailable - API key missing"}],
+            "Missing weather": [] if contextual_factors else [{"Status": "Unavailable - venue coordinates/API missing"}],
+            "Missing referee": [{"Status": "Unavailable - API key missing"}],
+            "Unsupported markets": missing_markets,
+            "API quota limits": api_usage or [],
+            "Live integration diagnostics": [
+                {"Diagnostic": key, "Value": value}
+                for key, value in (integration_diagnostics or {}).items()
+            ],
+            "API compatibility summary": compatibility_summary or [],
+            "Missing live research data": [
+                {"Status": value}
+                for value in (missing_data or [])
+            ],
         },
         "chatgpt_analysis_template": [
             "Potential value bets.",
@@ -555,6 +601,8 @@ def ai_package_to_markdown(package: dict[str, Any]) -> str:
     lines.append("")
     for key, value in package["source_summary"].items():
         lines.append(f"- {key}: {value}")
+    lines.extend(["", "### API Usage / Quota Status"])
+    lines.append(_markdown_table(package["api_usage"]) if package["api_usage"] else "No API usage headers captured.")
 
     lines.extend(["", "## Section 3 - Hard Rock FL Markets"])
     lines.append(
@@ -598,6 +646,78 @@ def ai_package_to_markdown(package: dict[str, Any]) -> str:
 
     lines.extend(["", "## Section 7 - Quantitative Analysis"])
     lines.append(_markdown_table(_quant_report_rows(package["quantitative_analysis"])))
+
+    lines.extend(["", "## Team Research"])
+    if package.get("team_mappings"):
+        lines.append("### API-Football Team ID Mappings")
+        lines.append(
+            _markdown_table(
+                [
+                    {
+                        "Team": team,
+                        "API-Football team ID": values.get("id"),
+                        "Matched name": values.get("matched_name"),
+                    }
+                    for team, values in package["team_mappings"].items()
+                ]
+            )
+        )
+    lines.append(_markdown_table(package["team_research"]) if package["team_research"] else "Unavailable - API key missing.")
+
+    lines.extend(["", "## Player Research"])
+    lines.append(_markdown_table(package["player_research"]) if package["player_research"] else "Unavailable - API key missing.")
+
+    lines.extend(["", "## Contextual Factors"])
+    lines.append(_markdown_table(package["contextual_factors"]) if package["contextual_factors"] else "Unavailable - API key missing.")
+
+    lines.extend(["", "## Live Integration Diagnostics"])
+    diagnostics = package.get("integration_diagnostics") or {}
+    lines.append(
+        _markdown_table(
+            [{"Diagnostic": key, "Value": value} for key, value in diagnostics.items()]
+        )
+        if diagnostics
+        else "No live integration diagnostics captured."
+    )
+    missing_data = package.get("missing_data") or []
+    lines.extend(["", "### Missing Data List"])
+    lines.append(
+        _markdown_table([{"Status": item} for item in missing_data])
+        if missing_data
+        else "None."
+    )
+
+    lines.extend(["", "## API Compatibility Summary"])
+    compatibility = package.get("compatibility_summary") or []
+    lines.append(
+        _markdown_table(compatibility)
+        if compatibility
+        else "No API compatibility summary captured."
+    )
+
+    audit = package.get("api_capability_audit") or {}
+    if audit:
+        lines.extend(["", "## API Capability Audit"])
+        lines.append("### APIs Configured")
+        lines.append(_markdown_table(audit.get("apis_configured", [])))
+        lines.append("### Master Data Compatibility Matrix")
+        lines.append(_markdown_table(audit.get("compatibility_matrix", [])))
+        lines.append("### Bet-Type Support Matrix")
+        lines.append(_markdown_table(audit.get("bet_type_support_matrix", [])))
+        lines.append("### API Limitations / Missing Data")
+        lines.append(
+            _markdown_table(
+                [{"Missing data": item} for item in audit.get("missing_data", [])]
+            )
+            if audit.get("missing_data")
+            else "None."
+        )
+        lines.append("### Manual Fallback List")
+        for item in audit.get("manual_research_checklist", []):
+            lines.append(f"- {item}")
+
+    lines.extend(["", "## Betting Signals"])
+    lines.append(_markdown_table(package["betting_signals"]) if package["betting_signals"] else "No betting signals generated.")
 
     lines.extend(["", "## Section 8 - Bet Rankings"])
     lines.append("### TOP 5 POTENTIAL VALUE BETS")
@@ -709,6 +829,31 @@ def chatgpt_analysis_package_to_markdown(package: dict[str, Any]) -> str:
     ]
     for key, rows in package["data_gaps"].items():
         lines.extend([f"### {key}", _markdown_table(rows) if rows else "None."])
+    audit = package.get("api_capability_audit") or {}
+    if audit:
+        lines.extend(["", "## API Capability Audit Summary"])
+        if audit.get("apis_configured"):
+            lines.extend(["### APIs Configured", _markdown_table(audit["apis_configured"])])
+        if audit.get("compatibility_matrix"):
+            lines.extend(
+                [
+                    "### Master Data Compatibility Matrix",
+                    _markdown_table(audit["compatibility_matrix"]),
+                ]
+            )
+        if audit.get("bet_type_support_matrix"):
+            lines.extend(
+                [
+                    "### Bet-Type Support Matrix",
+                    _markdown_table(audit["bet_type_support_matrix"]),
+                ]
+            )
+        if audit.get("missing_data"):
+            lines.extend(["### API Limitations"])
+            lines.extend(f"- {item}" for item in audit["missing_data"])
+        if audit.get("manual_research_checklist"):
+            lines.extend(["### Manual Fallback List"])
+            lines.extend(f"- {item}" for item in audit["manual_research_checklist"])
     return "\n".join(lines)
 
 
@@ -971,6 +1116,7 @@ def build_research_card(
     kelly_multiplier: float,
     bookmaker_key: str | None = None,
     manual: bool = False,
+    notes: str = "",
 ) -> ResearchBetCard:
     if not selection.strip():
         raise ValueError("Selection is required.")
@@ -1005,4 +1151,5 @@ def build_research_card(
         fractional_kelly=fractional_kelly,
         kelly_stake=max(0.0, bankroll * fractional_kelly),
         stake=stake,
+        notes=notes,
     )

@@ -218,7 +218,7 @@ class AppTests(unittest.TestCase):
             app.radio[0].options,
             [
                 "Home",
-                "Research Board",
+                "Research Lab",
                 "Manual Entry",
                 "Bet Cards",
                 "Parlay Builder",
@@ -229,7 +229,7 @@ class AppTests(unittest.TestCase):
         self.assertNotIn("Live Odds", app.radio[0].options)
         self.assertNotIn("Market Comparison", app.radio[0].options)
         self.assertNotIn("Advanced Markets", app.radio[0].options)
-        self.assertEqual(app.session_state["navigation_page"], "Research Board")
+        self.assertEqual(app.session_state["navigation_page"], "Research Lab")
 
         app.radio[0].set_value("Manual Entry").run()
         self.assertFalse(app.exception)
@@ -250,7 +250,7 @@ class AppTests(unittest.TestCase):
 
         self.assertFalse(app.exception)
         self.assertTrue(any("key is missing" in error.value for error in app.error))
-        self.assertEqual(app.title[0].value, "Research Board")
+        self.assertEqual(app.title[0].value, "Research Lab")
 
     @patch("src.odds_api.urlopen", side_effect=fake_api_response)
     def test_research_board_shows_missing_hardrock_api_warning(self, _mock_urlopen):
@@ -305,7 +305,7 @@ class AppTests(unittest.TestCase):
         )
 
         navigation = next(radio for radio in app.radio if radio.label == "Go to")
-        navigation.set_value("Research Board").run()
+        navigation.set_value("Research Lab").run()
         app.button[0].click().run()
         load_market = next(
             button
@@ -388,7 +388,7 @@ class AppTests(unittest.TestCase):
         create_button = next(
             button
             for button in app.button
-            if button.label == "Create Research Board bet card"
+            if button.label == "Create Research Lab bet card"
         )
         create_button.click().run()
 
@@ -400,7 +400,7 @@ class AppTests(unittest.TestCase):
         )
         self.assertTrue(
             any(
-                "Research Board bet card created" in success.value
+                "Research Lab bet card created" in success.value
                 for success in app.success
             )
         )
@@ -411,7 +411,7 @@ class AppTests(unittest.TestCase):
         _mock_urlopen,
     ):
         app = AppTest.from_file("app.py", default_timeout=10).run()
-        self.assertEqual(app.title[0].value, "Research Board")
+        self.assertEqual(app.title[0].value, "Research Lab")
 
         load_games = next(
             button for button in app.button if button.label == "Load games"
@@ -449,7 +449,7 @@ class AppTests(unittest.TestCase):
         create = next(
             button
             for button in app.button
-            if button.label == "Create Research Board bet card"
+            if button.label == "Create Research Lab bet card"
         )
         create.click().run()
 
@@ -489,21 +489,47 @@ class AppTests(unittest.TestCase):
         )
         self.assertTrue(
             any(
-                subheader.value == "Markets Missing From Hard Rock FL"
+                tab.label == "Market Coverage"
+                for tab in app.tabs
+            )
+        )
+        for label in [
+            "Research Data",
+            "Betting Signals",
+            "Lottery Builder",
+            "Export Package",
+            "API / Diagnostics",
+        ]:
+            self.assertTrue(any(tab.label == label for tab in app.tabs))
+        self.assertTrue(
+            any(
+                selectbox.label == "Select line to create research card"
+                for selectbox in app.selectbox
+            )
+        )
+        self.assertFalse(
+            any(
+                button.label == "Create research card from this line"
+                for button in app.button
+            )
+        )
+        self.assertTrue(
+            any(
+                subheader.value == "API Usage Monitor"
                 for subheader in app.subheader
             )
         )
         self.assertTrue(
             any(
-                "Exact Hard Rock FL API" in markdown.value
-                for markdown in app.markdown
+                subheader.value == "Export Package"
+                for subheader in app.subheader
             )
         )
 
         create = next(
             button
             for button in app.button
-            if button.label == "Create research card from this line"
+            if button.label == "Create research card from selected line"
         )
         create.click().run()
 

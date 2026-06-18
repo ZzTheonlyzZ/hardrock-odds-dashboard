@@ -4,15 +4,16 @@ Personal sports betting research dashboard built with Python and Streamlit.
 
 ## Primary workflow
 
-Use **Research Board** for the unified workflow:
+Use **Research Lab** for the unified workflow:
 
 - Select sport, event, market category, and specific market
 - See exact Florida, generic Hard Rock, other-book, and manual sources separately
 - Review market averages and no-vig probabilities
+- Review API usage, request budget, research gaps, team/player/context placeholders, and betting signals
 - Create source-labeled value research cards
+- Export AI Research Package and ChatGPT Analysis Package
 
-The older Live Odds, Market Comparison, and Advanced Markets pages remain
-available as secondary diagnostic tools.
+The older Live Odds, Market Comparison, and Advanced Markets pages are hidden from the main sidebar and remain internal diagnostic/debug renderers only.
 
 ## Important warnings
 
@@ -82,6 +83,70 @@ Betting is high variance. Only risk money you can afford to lose.
 - American odds format
 - Cached sports and odds requests
 - Safe missing-key, invalid-key, network, and rate-limit messages
+
+## Research Lab
+
+Research Lab combines odds, source coverage, market mapping, manual Hard Rock FL entry, research context, betting signals, API budget awareness, and exports into one clean workflow.
+
+It does:
+
+- Use The Odds API for odds, market consensus, `hardrockbet_fl`, and `hardrockbet` availability
+- Label every line by source and confidence
+- Fall back to manual Hard Rock FL entry when an API does not return a market
+- Track source coverage and quota status where headers or local counters are available
+- Generate AI Research Package exports for deeper external analysis
+- Generate a cleaner ChatGPT Analysis Package for copy/paste review
+
+It does not:
+
+- Place bets
+- Log into Hard Rock
+- Scrape Hard Rock
+- Use proxies, hidden endpoints, captcha bypasses, or sportsbook automation
+- Guarantee winners
+
+Manual Hard Rock FL confirmation is always required before any wager.
+
+## API keys and quotas
+
+Supported environment/config keys:
+
+- `THE_ODDS_API_KEY`: odds, Hard Rock source detection, and market consensus
+- `API_FOOTBALL_KEY`: future fixture/team/player/injury research
+- `FOOTBALL_DATA_KEY`: future backup fixture/standings data
+- Optional `SPORTMONKS_KEY`: future paid-source integration only
+
+Missing keys must not crash the app. Research Lab marks unavailable sections as `Unavailable - API key missing` and continues with available sources.
+
+Quota behavior:
+
+- The Odds API headers: `x-requests-remaining`, `x-requests-used`, `x-requests-last`
+- API-Football headers: `x-ratelimit-requests-limit`, `x-ratelimit-requests-remaining`, `X-RateLimit-Limit`, `X-RateLimit-Remaining`
+- football-data.org headers: `X-Requests-Available-Minute`, `X-RequestCounter-Reset`
+- Open-Meteo is tracked with local free-use limits: 10,000/day, 5,000/hour, 600/minute
+
+Research Lab shows a request budget preview before optional research loads.
+
+## Source confidence hierarchy
+
+1. Manual Hard Rock FL Entry: user-confirmed, highest confidence if copied from the app
+2. Exact Hard Rock FL API / `hardrockbet_fl`: high confidence
+3. Generic Hard Rock API / `hardrockbet`: medium confidence, may differ from Florida
+4. Market Consensus / Other Books: comparison only
+5. Unsupported or missing API markets: manual entry required
+
+## Exports
+
+Research Lab exports:
+
+- Copy text
+- TXT
+- Markdown
+- JSON
+- CSV market rows
+- ChatGPT Analysis Package markdown
+
+All exports are for potential value bet research only. ChatGPT analysis should separate Serious EV Bets, Small Edge Leans, Lottery Tickets, and No Bets, and should always include what could go wrong.
 
 ## The Odds API setup
 
